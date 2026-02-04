@@ -1,0 +1,90 @@
+name: Security
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+    branches: [main, master]
+  schedule:
+    # Weekly security scan
+    - cron: '0 6 * * 1'
+  workflow_dispatch:
+
+permissions:
+  security-events: write
+  contents: read
+
+jobs:
+  security-scan:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Secret Detection (Gitleaks)
+        uses: gitleaks/gitleaks-action@v2
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Filesystem Security Scan (Trivy)
+        uses: aquasecurity/trivy-action@0.33.1
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-fs.sarif'
+          severity: 'CRITICAL,HIGH'
+
+      - name: Upload Trivy SARIF
+        uses: github/codeql-action/upload-sarif@v3
+        if: always()
+        with:
+          sarif_file: trivy-fs.sarif
+
+  code-quality:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Check for dangerous C functions
+        run: |
+          echo "=== Security-sensitive function usage ==="
+          
+          # Critical: functions that should never be used
+          echo "Checking for gets()..."
+          if grep -rn "gets\s*(" src/; then
+            echo "❌ CRITICAL: Found gets() - must use fgets()"
+            exit 1
+          fi
+          
+          # Warning: functions that need careful review
+          echo "Checking for potentially unsafe functions..."
+          for func in sprintf strcpy strcat; do
+            if grep -rn "${func}\s*(" src/ 2>/dev/null | head -5; then
+              echo "⚠️  Found $func() - review for buffer overflows"
+            fi
+          done
+          
+          echo "✅ Critical security checks passed"
+
+      - name: Check header guards
+        run: |
+          echo "Checking header guards in src/..."
+          find src -name "*.h" | while read f; do
+            if ! grep -q "#ifndef" "$f" 2>/dev/null; then
+              echo "⚠️  Missing or non-standard header guard in $f"
+            fi
+          done
+          echo "✅ Header guard check complete"
+
+      - name: Detect hardcoded secrets patterns
+        run: |
+          echo "Checking for hardcoded secret patterns..."
+          patterns='password|secret|api_key|apikey|access_token|private_key'
+          if grep -riE "$patterns\s*=\s*[\"'][^\"']{8,}" src/ 2>/dev/null | grep -v "example\|test\|placeholder"; then
+            echo "⚠️  Potential hardcoded secrets found - review above"
+          fi
+          echo "✅ Secret pattern check complete"
