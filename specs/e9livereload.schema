@@ -1,0 +1,159 @@
+# E9 Live Reload Schema - Hot Patching Protocol
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Connects the components for real-time C source → binary updates:
+#   File Watcher → Recompile → Binaryen Diff → APE Patch → ICache Flush
+#
+# Workflow:
+#   1. inotify/kqueue detects .c file change
+#   2. cosmocc incrementally compiles to .o
+#   3. Binaryen diffs old .o vs new .o
+#   4. e9_ape_patch_* applies patches to mapped APE
+#   5. e9wasm_flush_icache invalidates instruction cache
+#   6. Execution continues with new code
+#
+# Pure C, spec-driven, cosmopolitan-native.
+#
+
+# ── Live Reload Configuration ────────────────────────────────────────────
+
+type E9LiveReloadConfig {
+    source_dir: string[256]           # Directory to watch for .c changes
+    compiler: string[256]             # Compiler path (default: cosmocc)
+    compiler_flags: string[1024]      # Additional flags
+
+    watch_interval_ms: u32 [default: 100]
+    enable_hot_patch: i32 [default: 1]  # Apply patches to running binary
+    enable_file_patch: i32 [default: 0] # Also write patched file
+
+    max_patch_size: u64 [default: 65536]  # Maximum single patch size
+    max_pending_patches: u32 [default: 256]
+}
+
+# ── Patch State ──────────────────────────────────────────────────────────
+
+type E9PatchState {
+    # Target binary info (APE)
+    target_path: string[256]
+    target_mapped: u64                # mmap base address
+    target_size: u64
+
+    # APE structure (from e9ape.c)
+    text_offset: i64
+    text_rva: u32
+    text_size: u64
+
+    rdata_offset: i64
+    rdata_rva: u32
+    rdata_size: u64
+
+    data_offset: i64
+    data_rva: u32
+    data_size: u64
+
+    # Self-patching (when target is self)
+    is_self_patch: i32 [default: 0]
+    exe_path: string[256]
+}
+
+# ── Pending Patch ────────────────────────────────────────────────────────
+
+type E9PendingPatch {
+    id: u32                           # Unique patch ID
+    source_file: string[256]          # Source .c file that changed
+    function_name: string[128]        # Function being patched (may be empty)
+
+    # Target location (PE RVA or file offset)
+    target_type: i32                  # 0=file_offset, 1=pe_rva, 2=va
+    target_address: u64
+
+    # Patch data
+    old_bytes_size: u64
+    new_bytes_size: u64
+    # old_bytes and new_bytes follow in buffer
+
+    # Status
+    status: i32                       # 0=pending, 1=applied, 2=failed, 3=reverted
+    error_msg: string[256]
+    timestamp: u64                    # When patch was generated
+}
+
+# ── Live Reload Session ──────────────────────────────────────────────────
+
+type E9LiveReloadSession {
+    state: i32                        # 0=idle, 1=watching, 2=compiling, 3=patching
+
+    # Statistics
+    total_changes_detected: u64
+    total_patches_generated: u64
+    total_patches_applied: u64
+    total_patches_failed: u64
+
+    # Timing
+    last_change_time: u64
+    last_compile_time: u64
+    last_patch_time: u64
+
+    # Object cache (for diffing)
+    cache_dir: string[256]            # .e9cache/ directory
+    num_cached_objects: u32
+}
+
+# ── Compiler Invocation ──────────────────────────────────────────────────
+
+type E9CompilerInvocation {
+    source_path: string[256]
+    object_path: string[256]
+
+    exit_code: i32
+    stdout_size: u64
+    stderr_size: u64
+    # stdout/stderr buffers follow
+
+    compile_time_ms: u64
+}
+
+# ── Live Reload Event ────────────────────────────────────────────────────
+
+type E9LiveReloadEvent {
+    event_type: i32                   # See constants below
+    timestamp: u64
+
+    # For file change events
+    file_path: string[256]
+
+    # For patch events
+    patch_id: u32
+    function_name: string[128]
+    patch_address: u64
+    patch_size: u64
+
+    # For error events
+    error_code: i32
+    error_msg: string[256]
+}
+
+# ── Constants ────────────────────────────────────────────────────────────
+
+const E9_LIVERELOAD_EVENT_FILE_CHANGE = 1
+const E9_LIVERELOAD_EVENT_COMPILE_START = 2
+const E9_LIVERELOAD_EVENT_COMPILE_DONE = 3
+const E9_LIVERELOAD_EVENT_COMPILE_ERROR = 4
+const E9_LIVERELOAD_EVENT_PATCH_GENERATED = 5
+const E9_LIVERELOAD_EVENT_PATCH_APPLIED = 6
+const E9_LIVERELOAD_EVENT_PATCH_FAILED = 7
+const E9_LIVERELOAD_EVENT_PATCH_REVERTED = 8
+
+const E9_PATCH_TARGET_FILE_OFFSET = 0
+const E9_PATCH_TARGET_PE_RVA = 1
+const E9_PATCH_TARGET_VA = 2
+
+const E9_PATCH_STATUS_PENDING = 0
+const E9_PATCH_STATUS_APPLIED = 1
+const E9_PATCH_STATUS_FAILED = 2
+const E9_PATCH_STATUS_REVERTED = 3
+
+const E9_SESSION_IDLE = 0
+const E9_SESSION_WATCHING = 1
+const E9_SESSION_COMPILING = 2
+const E9_SESSION_PATCHING = 3

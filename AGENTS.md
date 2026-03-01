@@ -56,9 +56,24 @@ E9_{TYPE}_{VALUE}        # Enums
 ## Quick Reference
 
 - Return `0` on success, `-1` on error
-- Use `e9_ape_get_error()` for error strings
-- Sync patches to both ELF and PE views by default
+- Use `e9_livereload_get_error()` for error strings
+- PE sections are ground truth for APE (no x86-64 ELF!)
 - ZipOS contains embedded assets (e.g., `binaryen.wasm`)
+
+## Live Reload (Hot Patching)
+
+Real-time C source → APE binary updates:
+
+```
+File Watch → cosmocc Recompile → Binaryen Diff → APE Patch → ICache Flush
+```
+
+Key files:
+- `src/e9patch/e9livereload.h` - Live reload API
+- `src/e9patch/e9livereload.c` - Integration layer
+- `src/e9patch/e9ape.h` - APE patching (PE-based)
+- `src/e9patch/wasm/e9binaryen.h` - Object diff via Binaryen
+- `specs/e9livereload.schema` - Protocol spec
 
 ## See Also
 

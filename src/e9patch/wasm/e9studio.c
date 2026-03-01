@@ -53,6 +53,7 @@
 
 #include "e9wasm_host.h"
 #include "../analysis/e9studio_analysis.h"
+#include "../e9livereload.h"
 
 #ifdef __linux__
 #include <sys/inotify.h>
@@ -313,6 +314,7 @@ static void print_usage(const char *prog) {
     printf("  d            Decompile current function\n");
     printf("  x            Show cross-references to current address\n");
     printf("  i            Show binary info\n");
+    printf("  l            Show live reload stats\n");
     printf("  s            Save patched binary\n");
     printf("  r            Reload and reanalyze\n");
     printf("  q            Quit\n");
@@ -446,81 +448,135 @@ static int init_wasm(void) {
 }
 
 /*
- * File watcher (inotify on Linux)
+ * Live Reload Integration
+ * Uses e9livereload.h for hot-patching APE binaries in real-time.
  */
-#ifdef __linux__
-static int g_inotify_fd = -1;
-static int g_watch_fd = -1;
+static bool g_livereload_initialized = false;
 
+/*
+ * Live reload event callback - updates TUI status
+ */
+static void livereload_callback(const E9LiveReloadEvent *event, void *userdata) {
+    (void)userdata;
+
+    switch (event->type) {
+        case E9_LR_EVENT_FILE_CHANGE:
+            set_status("Source changed: %s - recompiling...",
+                       event->file_path ? event->file_path : "unknown");
+            break;
+
+        case E9_LR_EVENT_COMPILE_START:
+            set_status("Compiling: %s",
+                       event->file_path ? event->file_path : "unknown");
+            break;
+
+        case E9_LR_EVENT_COMPILE_DONE:
+            set_status("Compiled: %s",
+                       event->file_path ? event->file_path : "unknown");
+            break;
+
+        case E9_LR_EVENT_COMPILE_ERROR:
+            set_status("Compile failed: %s - %s",
+                       event->file_path ? event->file_path : "unknown",
+                       event->error_msg ? event->error_msg : "unknown error");
+            break;
+
+        case E9_LR_EVENT_PATCH_GENERATED:
+            set_status("Patch #%u generated for %s (%zu bytes)",
+                       event->patch_id,
+                       event->function_name ? event->function_name : "code",
+                       event->patch_size);
+            break;
+
+        case E9_LR_EVENT_PATCH_APPLIED:
+            set_status("Patch #%u applied at 0x%lx (%zu bytes) [%s]",
+                       event->patch_id,
+                       (unsigned long)event->patch_address,
+                       event->patch_size,
+                       event->function_name ? event->function_name : "unknown");
+            break;
+
+        case E9_LR_EVENT_PATCH_FAILED:
+            set_status("Patch #%u failed: %s",
+                       event->patch_id,
+                       event->error_msg ? event->error_msg : "unknown error");
+            break;
+
+        case E9_LR_EVENT_PATCH_REVERTED:
+            set_status("Patch #%u reverted", event->patch_id);
+            break;
+
+        default:
+            break;
+    }
+
+    g_tui.needs_redraw = true;
+}
+
+/*
+ * Initialize live reload with target binary
+ */
 static int init_file_watcher(void) {
-    g_inotify_fd = inotify_init1(IN_NONBLOCK);
-    if (g_inotify_fd < 0) {
+    /* Use target binary for live reload, or self if analyzing self */
+    const char *target = g_config.target_path;
+
+    E9LiveReloadConfig lr_config = E9_LIVERELOAD_CONFIG_DEFAULT;
+    lr_config.source_dir = g_config.source_dir;
+    lr_config.verbose = g_config.verbose;
+    lr_config.enable_hot_patch = true;
+
+    if (e9_livereload_init(target, &lr_config) != 0) {
+        if (g_config.verbose) {
+            fprintf(stderr, "Live reload init failed: %s\n",
+                    e9_livereload_get_error());
+        }
         return -1;
     }
 
-    g_watch_fd = inotify_add_watch(g_inotify_fd, g_config.source_dir,
-                                    IN_MODIFY | IN_CLOSE_WRITE);
-    if (g_watch_fd < 0) {
-        close(g_inotify_fd);
-        g_inotify_fd = -1;
+    e9_livereload_set_callback(livereload_callback, NULL);
+
+    if (e9_livereload_watch() != 0) {
+        if (g_config.verbose) {
+            fprintf(stderr, "File watch start failed: %s\n",
+                    e9_livereload_get_error());
+        }
+        e9_livereload_shutdown();
         return -1;
+    }
+
+    g_livereload_initialized = true;
+
+    if (g_config.verbose) {
+        fprintf(stderr, "Live reload active: watching %s\n", g_config.source_dir);
+        if (e9_livereload_compiler_available()) {
+            fprintf(stderr, "Compiler: %s\n", e9_livereload_compiler_version());
+        }
     }
 
     return 0;
 }
 
+/*
+ * Poll for file changes and process live reload events
+ */
 static void check_file_changes(void) {
-    if (g_inotify_fd < 0) return;
+    if (!g_livereload_initialized) return;
 
-    char buf[4096];
-    ssize_t len = read(g_inotify_fd, buf, sizeof(buf));
-    if (len <= 0) return;
-
-    size_t offset = 0;
-    while (offset < (size_t)len) {
-        struct inotify_event *event = (struct inotify_event *)(buf + offset);
-
-        if (event->len > 0) {
-            const char *name = event->name;
-            size_t name_len = strlen(name);
-            if ((name_len > 2 && strcmp(name + name_len - 2, ".c") == 0) ||
-                (name_len > 2 && strcmp(name + name_len - 2, ".h") == 0)) {
-
-                char full_path[512];
-                snprintf(full_path, sizeof(full_path), "%s/%s",
-                         g_config.source_dir, name);
-
-                set_status("Source changed: %s - recompiling...", name);
-                int patches = e9studio_on_source_change(full_path);
-                if (patches > 0) {
-                    set_status("Generated %d patches from %s", patches, name);
-                } else if (patches == 0) {
-                    set_status("No changes detected in %s", name);
-                } else {
-                    set_status("Compilation failed for %s", name);
-                }
-            }
-        }
-
-        offset += sizeof(struct inotify_event) + event->len;
+    int events = e9_livereload_poll();
+    if (events > 0 && g_config.verbose) {
+        fprintf(stderr, "Processed %d live reload events\n", events);
     }
 }
 
+/*
+ * Cleanup live reload resources
+ */
 static void cleanup_file_watcher(void) {
-    if (g_watch_fd >= 0) {
-        inotify_rm_watch(g_inotify_fd, g_watch_fd);
-        g_watch_fd = -1;
-    }
-    if (g_inotify_fd >= 0) {
-        close(g_inotify_fd);
-        g_inotify_fd = -1;
+    if (g_livereload_initialized) {
+        e9_livereload_shutdown();
+        g_livereload_initialized = false;
     }
 }
-#else
-static int init_file_watcher(void) { return -1; }
-static void check_file_changes(void) {}
-static void cleanup_file_watcher(void) {}
-#endif
 
 /*
  * ANSI escape sequences for TUI
@@ -648,7 +704,7 @@ static void render_tui(void) {
 
     /* Help line */
     printf(ANSI_DIM);
-    printf(" TAB:view  j/k:scroll  n/p:func  g:goto  d:decompile  x:xrefs  s:save  q:quit");
+    printf(" TAB:view  j/k:scroll  n/p:func  g:goto  d:decompile  l:live  s:save  q:quit");
     printf(ANSI_RESET);
 
     fflush(stdout);
@@ -835,6 +891,39 @@ static void handle_input(void) {
             }
             break;
 
+        case 'l':   /* Show live reload stats */
+        case 'L':
+            if (g_livereload_initialized) {
+                E9LiveReloadStats stats;
+                e9_livereload_get_stats(&stats);
+
+                printf(ANSI_CLEAR ANSI_HOME);
+                printf(ANSI_BOLD "Live Reload Statistics" ANSI_RESET "\n");
+                printf("────────────────────────────────────────\n");
+                printf("  Changes detected:     %lu\n", (unsigned long)stats.changes_detected);
+                printf("  Patches generated:    %lu\n", (unsigned long)stats.patches_generated);
+                printf("  Patches applied:      %lu\n", (unsigned long)stats.patches_applied);
+                printf("  Patches failed:       %lu\n", (unsigned long)stats.patches_failed);
+                printf("  Patches reverted:     %lu\n", (unsigned long)stats.patches_reverted);
+                printf("  Total bytes patched:  %lu\n", (unsigned long)stats.total_bytes_patched);
+                printf("  Pending patches:      %zu\n", e9_livereload_pending_count());
+                printf("  Applied patches:      %zu\n", e9_livereload_applied_count());
+                printf("────────────────────────────────────────\n");
+                printf("  Compiler available:   %s\n",
+                       e9_livereload_compiler_available() ? "yes" : "no");
+                if (e9_livereload_compiler_available()) {
+                    printf("  Compiler version:     %s\n",
+                           e9_livereload_compiler_version());
+                }
+                printf("\nPress any key to continue...");
+                fflush(stdout);
+                read(STDIN_FILENO, &c, 1);
+                g_tui.needs_redraw = true;
+            } else {
+                set_status("Live reload not active");
+            }
+            break;
+
         case '?':   /* Help */
             print_usage("e9studio");
             printf("\nPress any key to continue...");
@@ -929,6 +1018,27 @@ static int run_self_tests(void) {
     /* Test executable path */
     const char *exe = e9wasm_get_exe_path();
     TEST("Executable path detection", exe != NULL && strlen(exe) > 0);
+
+    /* Test live reload initialization */
+    E9LiveReloadConfig lr_config = E9_LIVERELOAD_CONFIG_DEFAULT;
+    lr_config.source_dir = ".";
+    lr_config.verbose = true;
+
+    /* Live reload init on self (optional - may fail if not APE) */
+    int lr_init = e9_livereload_init(NULL, &lr_config);
+    WARN("Live reload initialization", lr_init == 0);
+
+    if (lr_init == 0) {
+        TEST("Live reload ready", e9_livereload_is_ready());
+        WARN("Compiler available", e9_livereload_compiler_available());
+
+        /* Get initial stats */
+        E9LiveReloadStats stats;
+        e9_livereload_get_stats(&stats);
+        TEST("Live reload stats", stats.changes_detected == 0);
+
+        e9_livereload_shutdown();
+    }
 
     /* Cleanup */
     e9studio_analysis_shutdown();

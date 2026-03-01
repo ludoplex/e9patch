@@ -60,6 +60,11 @@ ANALYSIS_SRCS = \
     src/e9patch/analysis/e9binpatch.c \
     src/e9patch/analysis/e9studio_analysis.c
 
+# APE patching (PE-based, no ELF for x86-64)
+APE_SRCS = \
+    src/e9patch/e9ape.c \
+    src/e9patch/e9livereload.c
+
 # WAMR sources (WebAssembly Micro Runtime with Fast JIT)
 WAMR_SRCS = \
     src/e9patch/vendor/wamr/core/iwasm/common/wasm_runtime_common.c \
@@ -69,9 +74,10 @@ WAMR_SRCS = \
 IDE_SRCS = \
     src/e9patch/ide/e9ide_protocol.c
 
-# E9Studio main sources (TUI)
+# E9Studio main sources (TUI) with Binaryen integration
 E9STUDIO_SRCS = \
     src/e9patch/wasm/e9wasm_host.c \
+    src/e9patch/wasm/e9binaryen.c \
     src/e9patch/wasm/e9studio.c
 
 # GUI Framework sources (tedit-cosmo inspired)
@@ -108,8 +114,9 @@ VENDOR_OBJS = $(VENDOR_SRCS:.c=.o)
 ANALYSIS_OBJS = $(ANALYSIS_SRCS:.c=.o)
 WAMR_OBJS = $(WAMR_SRCS:.c=.o)
 IDE_OBJS = $(IDE_SRCS:.c=.o)
+APE_OBJS = $(APE_SRCS:.c=.o)
 
-$(BUILD_DIR)/libe9vendor.a: $(VENDOR_OBJS) $(ANALYSIS_OBJS) $(WAMR_OBJS) $(IDE_OBJS) | $(BUILD_DIR)
+$(BUILD_DIR)/libe9vendor.a: $(VENDOR_OBJS) $(ANALYSIS_OBJS) $(WAMR_OBJS) $(IDE_OBJS) $(APE_OBJS) | $(BUILD_DIR)
 	$(AR) rcs $@ $^
 	@echo "Built vendor library with WAMR, analysis, and IDE: $@"
 
@@ -197,6 +204,7 @@ clean:
 	rm -f src/e9patch/vendor/wamr/core/shared/platform/cosmopolitan/*.o
 	rm -f src/e9patch/analysis/*.o
 	rm -f src/e9patch/ide/*.o
+	rm -f src/e9patch/*.o
 	rm -f src/e9studio/gui/*.o
 	rm -f src/e9studio/gui/platform/*.o
 
