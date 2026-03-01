@@ -478,10 +478,12 @@ FUTURE (IR-based):
   Latency: ~50-100ms (skip redundant compilation)
 
 OPTIONS:
-  1. LLVM IR: Use clang -emit-llvm, diff at IR level
-  2. Binaryen IR: WASM as intermediate, diff WASM modules
-  3. TinyCC: Fast compilation, negligible parse time
+  1. Ring 0 AST: Lemon + lexgen for C parsing, AST-level diff (RECOMMENDED)
+  2. LLVM IR: Use clang -emit-llvm, diff at IR level
+  3. Binaryen IR: ludoplex/binaryen WASM diffing (.com + .wasm)
   4. Incremental: ccache + -ffunction-sections, compile only changed
+
+NOTE: TinyCC is NOT compatible with Cosmopolitan (relocation errors)
 
 BINARYEN ADVANTAGE:
   Already integrated for object diffing. Could extend to:

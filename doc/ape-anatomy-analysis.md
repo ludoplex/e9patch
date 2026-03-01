@@ -244,7 +244,7 @@ Instead of using Chrome as the WASM runtime, we can embed wasm3 directly in the 
 ├─────────────────────────────────────────────────────────────────┤
 │ /zip/ (ZipOS filesystem):                                       │
 │   ├── e9patch-core.wasm      (~500KB)  ← Patching engine        │
-│   ├── compiler.wasm          (~2MB)    ← TinyCC or similar      │
+│   ├── binaryen.wasm          (~2MB)    ← WASM IR diffing        │
 │   ├── ui.wasm                (~300KB)  ← TUI framework          │
 │   ├── target.elf             (varies)  ← Binary to patch        │
 │   └── src/                             ← Source files           │
@@ -553,7 +553,12 @@ rewriting:
 5. **Single-file distribution** simplifies deployment enormously
 
 The recommended architecture is:
-- Native Cosmopolitan host (~500KB) with wasm3
+- Native Cosmopolitan host (~500KB) with wasm3/WAMR
 - e9patch core compiled to WASM (~500KB) for sandboxed execution
-- Embedded TinyCC in WASM (~2MB) for compilation
+- Ring 0 AST-based compilation (Lemon + lexgen) for live reload
+- Optional ludoplex/binaryen (.wasm) for IR-level diffing
 - All stored in ZipOS for single-file distribution
+
+> **Note:** TinyCC is NOT compatible with Cosmopolitan (produces "Invalid relocation
+> entry" errors). Use Ring 0 AST-based parsing (Lemon + lexgen) or cosmocc for
+> compilation. See docs/IR_PATCHING.md for the full architecture.

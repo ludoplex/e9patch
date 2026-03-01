@@ -91,20 +91,22 @@ jobs:
             echo "Note: e9patch.wasm not found, native mode will be used"
           fi
           
-          if [ -f "build/tcc.wasm" ]; then
-            echo "Including tcc.wasm in ZipOS"
-            cp build/tcc.wasm .cosmo/
+          # NOTE: TinyCC (tcc.wasm) is NOT compatible with Cosmopolitan
+          # Use binaryen.wasm for IR-level diffing instead
+          if [ -f "build/binaryen.wasm" ]; then
+            echo "Including binaryen.wasm in ZipOS"
+            cp build/binaryen.wasm .cosmo/
           fi
-          
+
           # Also check in src/ directory for pre-built modules
           if [ -f "src/e9patch/wasm/e9patch.wasm" ]; then
             echo "Including e9patch.wasm from src/"
             cp src/e9patch/wasm/e9patch.wasm .cosmo/
           fi
-          
-          if [ -f "src/e9patch/wasm/tcc.wasm" ]; then
-            echo "Including tcc.wasm from src/"
-            cp src/e9patch/wasm/tcc.wasm .cosmo/
+
+          if [ -f "src/e9patch/wasm/binaryen.wasm" ]; then
+            echo "Including binaryen.wasm from src/"
+            cp src/e9patch/wasm/binaryen.wasm .cosmo/
           fi
           
           # Create the resources archive

@@ -147,12 +147,9 @@ action invoke_compiler {
         //   - Changed function bodies (from new AST)
         // Compile with: cosmocc -c -ffunction-sections
 
-        // Option: Use TinyCC for faster compilation
-        #ifdef USE_TCC
-            tcc_compile_string(tcc, source);
-        #else
-            system("cosmocc -c -ffunction-sections ...");
-        #endif
+        // NOTE: TinyCC is NOT compatible with Cosmopolitan
+        // Use cosmocc for compilation (Ring 0 AST can reduce latency)
+        system("cosmocc -c -ffunction-sections ...");
     }
 }
 
@@ -249,9 +246,9 @@ guard compile_succeeded {
     }
 }
 
-guard use_tcc {
-    doc "Check if TinyCC is available and enabled"
+guard use_ccache {
+    doc "Check if ccache is available for faster rebuilds"
     code {
-        return ctx->config.use_tcc && tcc_available();
+        return ctx->config.use_ccache && ccache_available();
     }
 }
