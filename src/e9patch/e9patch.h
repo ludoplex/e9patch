@@ -427,14 +427,45 @@ struct PEInfo
 #define WINDOWS_VIRTUAL_ALLOC_SIZE      ((size_t)0x10000ull)    // 64KB
 
 /*
+ * APE (Actually Portable Executable) info for polyglot binaries.
+ * APE binaries are simultaneously valid as ELF, PE, and shell scripts.
+ * They can also contain ZipOS embedded files.
+ */
+struct APEInfo
+{
+    /* APE contains BOTH ELF and PE views */
+    ElfInfo elf;                        // Embedded ELF information.
+    PEInfo pe;                          // Embedded PE information.
+
+    /* APE-specific offsets */
+    off_t shell_offset;                 // Shell script shebang offset.
+    size_t shell_size;                  // Shell script size.
+    off_t elf_offset;                   // ELF header offset within APE.
+    size_t elf_size;                    // ELF section size.
+    off_t pe_offset;                    // PE/DOS header offset within APE.
+    size_t pe_size;                     // PE section size.
+
+    /* ZipOS (embedded filesystem) */
+    off_t zipos_start;                  // Start of ZIP local file headers.
+    off_t zipos_central_dir;            // ZIP central directory offset.
+    off_t zipos_end;                    // End of ZIP structure.
+    uint32_t zipos_num_entries;         // Number of ZipOS entries.
+
+    /* Synchronization flags */
+    bool sync_elf_pe;                   // Sync patches to both ELF and PE.
+    bool preserve_zipos;                // Preserve ZipOS content on write.
+};
+
+/*
  * Supported binary modes.
  */
-enum Mode 
+enum Mode
 {
     MODE_ELF_EXE,                       // Linux ELF executable.
     MODE_ELF_DSO,                       // Linux ELF shared object.
     MODE_PE_EXE,                        // Windows PE executable.
     MODE_PE_DLL,                        // Windows PE DLL.
+    MODE_APE_EXE,                       // APE (Actually Portable Executable).
 };
 
 /*
@@ -534,8 +565,9 @@ struct Binary
     const char *output;                 // The rewritten binary's path.
     union
     {
-        ElfInfo elf;                    // ELF information.
-        PEInfo pe;                      // PE information.
+        ElfInfo elf;                    // ELF information (MODE_ELF_*).
+        PEInfo pe;                      // PE information (MODE_PE_*).
+        APEInfo ape;                    // APE information (MODE_APE_EXE).
     };
     Mode mode;                          // Binary mode.
     intptr_t config;                    // Config pointer.
