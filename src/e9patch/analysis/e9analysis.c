@@ -92,6 +92,7 @@
 static int detect_elf(E9Binary *bin);
 static int detect_pe(E9Binary *bin);
 static int detect_macho(E9Binary *bin);
+static int detect_ape(E9Binary *bin);
 
 static int parse_elf_symbols(E9Binary *bin);
 static int parse_pe_symbols(E9Binary *bin);
@@ -120,6 +121,11 @@ static void *e9_alloc(size_t size)
         fprintf(stderr, "e9analysis: allocation failed (%zu bytes)\n", size);
     }
     return p;
+}
+
+static void e9_free(void *ptr)
+{
+    free(ptr);
 }
 
 static void *e9_realloc(void *ptr, size_t size)
@@ -287,6 +293,11 @@ int e9_binary_detect(E9Binary *bin)
     }
 
     const uint8_t *data = bin->data;
+
+    /* Check APE first - APE binaries are polyglot MZ+ELF+PE+shell */
+    if (e9_binary_is_ape(data, bin->size)) {
+        return detect_ape(bin);
+    }
 
     /* Check ELF */
     if (memcmp(data, ELF_MAGIC, 4) == 0) {
@@ -510,6 +521,267 @@ static int detect_macho(E9Binary *bin)
     }
 
     return 0;
+}
+
+/*
+ * ============================================================================
+ * APE (Actually Portable Executable) Detection and Parsing
+ * ============================================================================
+ */
+
+/*
+ * APE magic: starts with 'MZqFpD' (DOS MZ header with special signature)
+ * or 'jartsr' shell script prefix followed by binary bootstrap
+ */
+#define APE_MAGIC_MZ    "MZqFpD"
+#define APE_MAGIC_SHELL "jartsr"
+
+bool e9_binary_is_ape(const uint8_t *data, size_t size)
+{
+    if (!data || size < 64) return false;
+
+    /* Check for APE MZ signature (most common) */
+    if (memcmp(data, APE_MAGIC_MZ, 6) == 0) {
+        return true;
+    }
+
+    /* Check for shell script APE variant */
+    if (data[0] == '#' && data[1] == '!') {
+        /* Look for embedded ELF and PE in first 64KB */
+        size_t scan_limit = (size < 65536) ? size : 65536;
+        bool has_elf = false, has_pe = false;
+
+        for (size_t i = 0; i < scan_limit - 4; i++) {
+            if (!has_elf && memcmp(data + i, "\x7fELF", 4) == 0) {
+                has_elf = true;
+            }
+            if (!has_pe && data[i] == 'M' && data[i+1] == 'Z') {
+                /* Check if there's a PE signature */
+                if (i + 64 < size) {
+                    uint32_t pe_off = *(uint32_t *)(data + i + 0x3C);
+                    if (i + pe_off + 4 < size &&
+                        memcmp(data + i + pe_off, "PE\0\0", 4) == 0) {
+                        has_pe = true;
+                    }
+                }
+            }
+            if (has_elf && has_pe) return true;
+        }
+    }
+
+    /* Check for standard MZ that also contains ELF (APE polyglot) */
+    if (data[0] == 'M' && data[1] == 'Z') {
+        /* Look for ELF header within first 4KB */
+        for (size_t i = 64; i < 4096 && i + 4 < size; i++) {
+            if (memcmp(data + i, "\x7fELF", 4) == 0) {
+                return true;  /* MZ + ELF = APE */
+            }
+        }
+    }
+
+    return false;
+}
+
+static int detect_ape(E9Binary *bin)
+{
+    const uint8_t *data = bin->data;
+    size_t size = bin->size;
+
+    bin->format = E9_FORMAT_APE;
+
+    /* Parse APE layout */
+    memset(&bin->ape, 0, sizeof(bin->ape));
+
+    /* Find shell script offset */
+    if (data[0] == '#' && data[1] == '!') {
+        bin->ape.shell_offset = 0;
+        /* Find end of shell portion (look for binary data) */
+        for (size_t i = 0; i < size && i < 4096; i++) {
+            if (data[i] == 0x7f && i + 4 < size &&
+                memcmp(data + i, "\x7fELF", 4) == 0) {
+                bin->ape.shell_size = i;
+                break;
+            }
+        }
+    }
+
+    /* Find ELF header */
+    for (size_t i = 0; i < size - 4 && i < 65536; i++) {
+        if (memcmp(data + i, "\x7fELF", 4) == 0) {
+            bin->ape.elf_offset = i;
+
+            /* Parse ELF to get size and entry point */
+            if (i + 64 < size && data[i + 4] == 2) {  /* 64-bit */
+                uint64_t entry = *(uint64_t *)(data + i + 24);
+                bin->entry_point = entry;
+
+                uint64_t phoff = *(uint64_t *)(data + i + 32);
+                uint16_t phnum = *(uint16_t *)(data + i + 56);
+
+                /* Calculate ELF size from program headers */
+                uint64_t max_end = 0;
+                for (uint16_t j = 0; j < phnum && i + phoff + 56 <= size; j++) {
+                    uint64_t p_offset = *(uint64_t *)(data + i + phoff + j * 56 + 8);
+                    uint64_t p_filesz = *(uint64_t *)(data + i + phoff + j * 56 + 32);
+                    if (p_offset + p_filesz > max_end) {
+                        max_end = p_offset + p_filesz;
+                    }
+                }
+                bin->ape.elf_size = max_end;
+
+                /* Get architecture from ELF */
+                uint16_t machine = *(uint16_t *)(data + i + 18);
+                switch (machine) {
+                    case ELF_MACHINE_X64:
+                        bin->arch = E9_ARCH_X86_64;
+                        break;
+                    case ELF_MACHINE_AARCH64:
+                        bin->arch = E9_ARCH_AARCH64;
+                        break;
+                    default:
+                        bin->arch = E9_ARCH_UNKNOWN;
+                }
+            }
+            break;
+        }
+    }
+
+    /* Find PE header */
+    for (size_t i = 0; i < size - 64; i++) {
+        if (data[i] == 'M' && data[i+1] == 'Z') {
+            uint32_t pe_off = *(uint32_t *)(data + i + 0x3C);
+            if (i + pe_off + 4 < size &&
+                memcmp(data + i + pe_off, "PE\0\0", 4) == 0) {
+                bin->ape.pe_offset = i;
+
+                /* Calculate PE size from section table */
+                uint16_t num_sections = *(uint16_t *)(data + i + pe_off + 6);
+                uint16_t opt_hdr_size = *(uint16_t *)(data + i + pe_off + 20);
+                size_t sec_table = i + pe_off + 24 + opt_hdr_size;
+
+                uint32_t max_end = 0;
+                for (uint16_t j = 0; j < num_sections && sec_table + 40 <= size; j++) {
+                    uint32_t raw_ptr = *(uint32_t *)(data + sec_table + 20);
+                    uint32_t raw_size = *(uint32_t *)(data + sec_table + 16);
+                    if (raw_ptr + raw_size > max_end) {
+                        max_end = raw_ptr + raw_size;
+                    }
+                    sec_table += 40;
+                }
+                bin->ape.pe_size = max_end;
+                break;
+            }
+        }
+    }
+
+    /* Find ZipOS (ZIP central directory at end) */
+    for (size_t i = size - 22; i > 0 && i > size - 65536; i--) {
+        if (data[i] == 'P' && data[i+1] == 'K' &&
+            data[i+2] == 0x05 && data[i+3] == 0x06) {
+            bin->ape.zipos_end = i + 22;
+            bin->ape.zipos_num_entries = *(uint16_t *)(data + i + 10);
+            bin->ape.zipos_central_dir = *(uint32_t *)(data + i + 16);
+
+            /* Find first local file header */
+            for (size_t j = 0; j < bin->ape.zipos_central_dir && j + 4 < size; j++) {
+                if (data[j] == 'P' && data[j+1] == 'K' &&
+                    data[j+2] == 0x03 && data[j+3] == 0x04) {
+                    bin->ape.zipos_start = j;
+                    break;
+                }
+            }
+            break;
+        }
+    }
+
+    /* If no entry point from ELF, use base address heuristic */
+    if (bin->entry_point == 0) {
+        bin->entry_point = 0x400000;  /* Common Linux base */
+    }
+    if (bin->base_address == 0) {
+        bin->base_address = 0x400000;
+    }
+
+    return 0;
+}
+
+int e9_binary_parse_ape(E9Binary *bin)
+{
+    if (!bin || bin->format != E9_FORMAT_APE) {
+        return -1;
+    }
+    /* Layout already parsed in detect_ape */
+    return 0;
+}
+
+E9Binary *e9_ape_get_elf_view(E9Binary *bin)
+{
+    if (!bin || bin->format != E9_FORMAT_APE || bin->ape.elf_offset == 0) {
+        return NULL;
+    }
+
+    E9Binary *view = e9_alloc(sizeof(E9Binary));
+    if (!view) return NULL;
+
+    view->data = bin->data + bin->ape.elf_offset;
+    view->size = bin->ape.elf_size;
+    view->base_address = bin->base_address;
+    view->arch = bin->arch;
+    view->format = E9_FORMAT_ELF;
+
+    /* Re-detect to populate sections etc. */
+    detect_elf(view);
+
+    return view;
+}
+
+E9Binary *e9_ape_get_pe_view(E9Binary *bin)
+{
+    if (!bin || bin->format != E9_FORMAT_APE || bin->ape.pe_offset == 0) {
+        return NULL;
+    }
+
+    E9Binary *view = e9_alloc(sizeof(E9Binary));
+    if (!view) return NULL;
+
+    view->data = bin->data + bin->ape.pe_offset;
+    view->size = bin->ape.pe_size;
+    view->base_address = bin->base_address;
+    view->arch = bin->arch;
+    view->format = E9_FORMAT_PE;
+
+    /* Re-detect to populate sections etc. */
+    detect_pe(view);
+
+    return view;
+}
+
+void e9_ape_free_view(E9Binary *view)
+{
+    if (view) {
+        /* Don't free data - it's a pointer into parent APE */
+        e9_free(view);
+    }
+}
+
+int e9_ape_patch_sync(E9Binary *bin, uint64_t vaddr,
+                      const uint8_t *bytes, size_t size)
+{
+    if (!bin || bin->format != E9_FORMAT_APE || !bytes) {
+        return -1;
+    }
+
+    /* Convert vaddr to file offsets in both ELF and PE sections */
+    /* For APE, the same virtual address appears at different file offsets
+     * in the ELF and PE views. We need to patch both. */
+
+    /* TODO: Implement proper vaddr to offset translation for both views */
+    /* For now, we patch at the raw offset in the ELF view only */
+
+    /* This is a placeholder - full implementation requires understanding
+     * the relationship between ELF and PE virtual address spaces in APE */
+
+    return -1;  /* Not fully implemented yet */
 }
 
 /*

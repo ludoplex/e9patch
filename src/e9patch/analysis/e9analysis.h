@@ -46,6 +46,7 @@ typedef enum {
     E9_FORMAT_ELF,
     E9_FORMAT_PE,
     E9_FORMAT_MACHO,
+    E9_FORMAT_APE,      /* Actually Portable Executable (polyglot ELF+PE+shell) */
     E9_FORMAT_RAW,
 } E9Format;
 
@@ -391,6 +392,22 @@ struct E9Binary {
         enum { XREF_CALL, XREF_JUMP, XREF_DATA } type;
     } *xrefs;
     uint32_t num_xrefs;
+
+    /* APE-specific layout (for E9_FORMAT_APE) */
+    struct {
+        uint64_t shell_offset;      /* Shell script shebang location */
+        uint64_t shell_size;
+        uint64_t elf_offset;        /* ELF header offset */
+        uint64_t elf_size;
+        uint64_t pe_offset;         /* PE header offset */
+        uint64_t pe_size;
+        uint64_t macho_offset;      /* Mach-O offset (if present) */
+        uint64_t macho_size;
+        uint64_t zipos_start;       /* ZipOS local file headers */
+        uint64_t zipos_central_dir; /* ZipOS central directory */
+        uint64_t zipos_end;         /* ZipOS end of central directory */
+        uint32_t zipos_num_entries;
+    } ape;
 };
 
 /*
@@ -680,6 +697,62 @@ const int *e9_cc_arg_regs(E9Arch arch, int calling_convention, int *count);
  * Get calling convention return register
  */
 int e9_cc_ret_reg(E9Arch arch, int calling_convention);
+
+/*
+ * ============================================================================
+ * APE (Actually Portable Executable) Support
+ * ============================================================================
+ */
+
+/*
+ * Detect if binary is APE format
+ */
+bool e9_binary_is_ape(const uint8_t *data, size_t size);
+
+/*
+ * Parse APE layout into E9Binary.ape struct
+ */
+int e9_binary_parse_ape(E9Binary *bin);
+
+/*
+ * Get the ELF view of an APE binary (for ELF-specific operations)
+ * Returns a temporary E9Binary pointing into the APE's ELF section
+ */
+E9Binary *e9_ape_get_elf_view(E9Binary *bin);
+
+/*
+ * Get the PE view of an APE binary (for PE-specific operations)
+ * Returns a temporary E9Binary pointing into the APE's PE section
+ */
+E9Binary *e9_ape_get_pe_view(E9Binary *bin);
+
+/*
+ * Free an APE view obtained from e9_ape_get_*_view()
+ */
+void e9_ape_free_view(E9Binary *view);
+
+/*
+ * Apply a patch to APE binary, updating both ELF and PE views
+ * This ensures cross-platform consistency of patches
+ */
+int e9_ape_patch_sync(E9Binary *bin, uint64_t vaddr,
+                      const uint8_t *bytes, size_t size);
+
+/*
+ * Extract ZipOS contents from APE
+ */
+int e9_ape_zipos_list(E9Binary *bin, char ***entries, uint32_t *count);
+
+/*
+ * Extract a specific file from APE's ZipOS
+ */
+uint8_t *e9_ape_zipos_extract(E9Binary *bin, const char *path, size_t *size);
+
+/*
+ * Update a file in APE's ZipOS (for in-place ZipOS editing)
+ */
+int e9_ape_zipos_update(E9Binary *bin, const char *path,
+                        const uint8_t *data, size_t size);
 
 #ifdef __cplusplus
 }

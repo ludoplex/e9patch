@@ -1,0 +1,216 @@
+# E9APE Schema - APE Binary Format Structures
+# ═══════════════════════════════════════════════════════════════════════
+#
+# Based on RE analysis of actual APE binary (cosmocc output)
+# Analysis date: 2026-02-28
+#
+# ╔══════════════════════════════════════════════════════════════════╗
+# ║ KEY FINDING: APE has NO x86-64 ELF header embedded!              ║
+# ║                                                                   ║
+# ║ Actual structure (from RE of hello.ape):                         ║
+# ║   0x00000 - MZ header + shell script bootstrap (heredoc trick)   ║
+# ║   0x10A58 - PE header (e_lfanew points here)                     ║
+# ║   0x11000 - .text section (shared code)                          ║
+# ║   0x2F000 - .rdata section                                       ║
+# ║   0x35000 - .data section                                        ║
+# ║   0x3C000 - ARM64 ELF (for aarch64, NOT x86-64!)                 ║
+# ║   EOF-256 - ZipOS (PK signatures, .cosmo, .symtab.*)             ║
+# ║                                                                   ║
+# ║ On Linux x86-64:                                                  ║
+# ║   - Kernel sees "#!/" shell script header                        ║
+# ║   - Shell executes bootstrap which:                               ║
+# ║     a) Uses `ape` loader if available                            ║
+# ║     b) Or extracts loader to $TMPDIR/.ape-1.10                   ║
+# ║     c) Or --assimilate writes ELF header in-place                ║
+# ║                                                                   ║
+# ║ For patching: Use PE sections as ground truth for file offsets.  ║
+# ╚══════════════════════════════════════════════════════════════════╝
+
+# ── PE File Header (COFF) ─────────────────────────────────────────────
+# Immediately follows "PE\0\0" signature at pe_offset.
+
+type E9PeFileHeader {
+    machine: u16                    # 0x8664 = x86-64, 0x01C4 = ARM64
+    number_of_sections: u16         # Typically 3 for APE (.text, .rdata, .data)
+    time_date_stamp: u32            # Build timestamp
+    pointer_to_symbol_table: u32    # Usually 0
+    number_of_symbols: u32          # Usually 0
+    size_of_optional_header: u16    # 240 for PE32+
+    characteristics: u16            # EXECUTABLE_IMAGE | LARGE_ADDRESS_AWARE
+}
+
+# ── PE Optional Header (64-bit) ───────────────────────────────────────
+
+type E9PeOptionalHeader64 {
+    magic: u16                      # 0x20B for PE32+
+    major_linker_version: u8
+    minor_linker_version: u8
+    size_of_code: u32
+    size_of_initialized_data: u32
+    size_of_uninitialized_data: u32
+    address_of_entry_point: u32     # RVA - add to image_base for VA
+    base_of_code: u32
+    image_base: u64                 # e.g., 0x00400000
+    section_alignment: u32
+    file_alignment: u32
+    major_os_version: u16
+    minor_os_version: u16
+    major_image_version: u16
+    minor_image_version: u16
+    major_subsystem_version: u16
+    minor_subsystem_version: u16
+    win32_version_value: u32
+    size_of_image: u32
+    size_of_headers: u32
+    check_sum: u32
+    subsystem: u16                  # CONSOLE=3, GUI=2
+    dll_characteristics: u16
+    size_of_stack_reserve: u64
+    size_of_stack_commit: u64
+    size_of_heap_reserve: u64
+    size_of_heap_commit: u64
+    loader_flags: u32
+    number_of_rva_and_sizes: u32
+}
+
+# ── PE Section Header ─────────────────────────────────────────────────
+# In APE: pointer_to_raw_data often equals virtual_address (same offset)
+
+type E9PeSectionHeader {
+    name: string[8]                 # ".text", ".rdata", ".data"
+    virtual_size: u32
+    virtual_address: u32            # RVA when loaded
+    size_of_raw_data: u32
+    pointer_to_raw_data: u32        # File offset (KEY for patching!)
+    pointer_to_relocations: u32
+    pointer_to_linenumbers: u32
+    number_of_relocations: u16
+    number_of_linenumbers: u16
+    characteristics: u32            # EXECUTE|READ, READ, READ|WRITE
+}
+
+# ── Shell Bootstrap Info ──────────────────────────────────────────────
+# The shell script embedded in APE header using heredoc trick
+
+type E9ShellBootstrap {
+    heredoc_marker: string[32]      # Random string like "justinezgyqwu"
+    script_offset: i64              # After MZ fields
+    script_size: u64
+    has_assimilate: i32             # --assimilate support
+    has_loader_extract: i32         # Extracts .ape-X.XX loader
+    ape_version: string[16]         # e.g., "1.10"
+}
+
+# ── Embedded Architecture ─────────────────────────────────────────────
+# APE can contain multiple arch binaries (x86-64 uses PE, ARM64 has ELF)
+
+type E9EmbeddedArch {
+    arch_name: string[16]           # "x86_64", "aarch64"
+    format: string[8]               # "pe", "elf"
+    file_offset: i64                # Offset in APE file
+    size: u64
+    entry_offset: u64               # Entry point relative to arch start
+    is_primary: i32                 # 1 if this is the main arch
+}
+
+# ── APE Info (Master Structure) ───────────────────────────────────────
+# Complete description of APE binary layout from RE analysis
+
+type E9ApeInfo {
+    # File basics
+    file_size: u64
+    is_cosmopolitan: i32            # Has "MZqFpD" magic
+
+    # MZ header
+    mz_offset: i64                  # Always 0
+    pe_header_offset: i64           # From e_lfanew at 0x3C (e.g., 0x10A58)
+
+    # Shell bootstrap
+    shell_start: i64                # After heredoc open
+    shell_end: i64                  # Before binary code
+
+    # PE structure (PRIMARY for x86-64 patching!)
+    pe_machine: u16                 # 0x8664
+    pe_num_sections: u16            # Typically 3
+    pe_entry_rva: u32               # Entry point RVA
+    pe_image_base: u64
+
+    # Section info (from PE headers - these are file offsets!)
+    text_offset: i64                # .text file offset (e.g., 0x11000)
+    text_rva: u32                   # .text RVA
+    text_size: u64
+
+    rdata_offset: i64
+    rdata_rva: u32
+    rdata_size: u64
+
+    data_offset: i64
+    data_rva: u32
+    data_size: u64
+
+    # Embedded architectures
+    num_embedded_archs: u32
+    arm64_elf_offset: i64           # 0 if not present (e.g., 0x3C000)
+    arm64_elf_size: u64
+
+    # NOTE: x86-64 has NO separate ELF! Uses PE sections directly.
+    # ELF header only exists after --assimilate
+    x86_has_elf: i32 [default: 0]   # 0 for normal APE
+    x86_elf_offset: i64             # Only valid if assimilated
+
+    # ZipOS
+    zipos_start: i64                # First PK signature
+    zipos_central_dir: i64
+    zipos_end: i64                  # End of file usually
+    zipos_num_entries: u32
+
+    # Patching configuration
+    patch_via_pe: i32 [default: 1]  # Use PE offsets (recommended)
+    preserve_zipos: i32 [default: 1]
+}
+
+# ── ZipOS Entry ───────────────────────────────────────────────────────
+
+type E9ZipOSEntry {
+    name: string[256]
+    local_header_offset: i64
+    compressed_size: u64
+    uncompressed_size: u64
+    compression: u16                # 0=stored, 8=deflate
+    crc32: u32
+    is_directory: i32 [default: 0]
+}
+
+# ── Address Translation ───────────────────────────────────────────────
+# Maps between PE RVA and file offset
+
+type E9AddressMapping {
+    pe_rva: u32                     # PE relative virtual address
+    file_offset: i64                # Actual file offset
+    section_index: i32              # Which section (-1 if none)
+    section_name: string[8]
+    is_executable: i32
+    is_writable: i32
+}
+
+# ── Patch Descriptor ──────────────────────────────────────────────────
+
+type E9ApePatch {
+    target_type: i32                # 0=file_offset, 1=pe_rva, 2=symbol
+    target_value: u64               # Offset, RVA, or symbol hash
+    patch_size: u64
+    # patch_data follows in buffer
+}
+
+# ── Constants ─────────────────────────────────────────────────────────
+
+const APE_MAGIC_MZ = "MZqFpD"
+const APE_MAGIC_SHELL = "#!/"
+const PE_SIGNATURE = "PE\0\0"
+const PE32_PLUS_MAGIC = 0x20B
+const PE_MACHINE_AMD64 = 0x8664
+const PE_MACHINE_ARM64 = 0xAA64
+const ELF_MAGIC = "\x7fELF"
+const ZIP_LOCAL_MAGIC = "PK\x03\x04"
+const ZIP_CENTRAL_MAGIC = "PK\x01\x02"
+const ZIP_END_MAGIC = "PK\x05\x06"
