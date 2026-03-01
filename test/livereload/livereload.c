@@ -36,40 +36,15 @@
 #include <sys/wait.h>
 #include <stdarg.h>
 
-/* Platform-specific includes
- *
- * Cosmopolitan APE builds:
- *   - Runtime detection via IsLinux(), IsWindows(), IsBsd()
- *   - Use polling for file watching (portable, no inotify wrapper yet)
- *   - ptrace available via <sys/ptrace.h>
- *
- * Native builds:
- *   - Linux: inotify for file watching
- *   - macOS/BSD: kqueue for file watching
- *   - Windows: polling fallback
- */
+/* Platform-specific includes for ptrace */
 #ifdef __COSMOPOLITAN__
-  /* APE build - uses Cosmopolitan's runtime detection */
-  #include <libc/dce.h>               /* IsLinux(), IsWindows(), IsBsd() */
   #include <libc/calls/calls.h>       /* ptrace() */
   #include <libc/sysv/consts/ptrace.h> /* PTRACE_* constants */
   #include <sys/mman.h>
-  /* Polling for file watching - most portable for APE */
-  #define USE_POLLING_ONLY 1
 #else
-  /* Native build - use platform headers */
   #include <sys/ptrace.h>
   #include <sys/user.h>
   #include <sys/mman.h>
-  #if defined(__linux__)
-    #include <sys/inotify.h>
-    #define USE_INOTIFY 1
-  #elif defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
-    #include <sys/event.h>
-    #define USE_KQUEUE 1
-  #else
-    #define USE_POLLING_ONLY 1
-  #endif
 #endif
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -514,210 +489,34 @@ static int handle_file_change(const char *source_file) {
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * File Watching (Portable)
+ * File Watching (stat-based polling)
  *
- * Platform backends:
- *   - Linux: inotify (efficient, event-driven)
- *   - macOS/BSD: kqueue (efficient, event-driven)
- *   - Windows/other: stat polling (universal fallback)
- *
- * Cosmopolitan provides IsLinux(), IsXnu(), IsBsd(), IsWindows() for dispatch.
+ * KISS: stat() polling works everywhere and 100ms latency is fine for a dev
+ * tool where recompilation takes way longer anyway.
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-/* Watch state for portable implementation */
-typedef struct {
-    int fd;                     /* inotify/kqueue fd, or -1 for polling */
-    char watch_dir[MAX_PATH];
-    char watch_file[MAX_PATH];
-    time_t last_mtime;          /* For stat-based polling */
-    int use_polling;            /* Fallback mode */
-} WatchState;
+static char g_watch_file[MAX_PATH];
+static time_t g_last_mtime;
 
-static WatchState g_watch = {0};
-
-/* Get file mtime for polling fallback */
 static time_t get_mtime(const char *path) {
     struct stat st;
     if (stat(path, &st) != 0) return 0;
     return st.st_mtime;
 }
 
-#if defined(USE_INOTIFY)
-/* Linux: inotify backend */
-static int setup_watch(const char *dir) {
-    int fd = inotify_init1(IN_NONBLOCK);
-    if (fd < 0) {
-        log_info("inotify unavailable, using polling fallback");
-        g_watch.use_polling = 1;
-        g_watch.fd = -1;
-        strncpy(g_watch.watch_dir, dir, MAX_PATH - 1);
-        return 0;
-    }
+static int poll_events(void) {
+    if (g_watch_file[0] == '\0') return 0;
 
-    int wd = inotify_add_watch(fd, dir, IN_CLOSE_WRITE | IN_MODIFY);
-    if (wd < 0) {
-        log_info("inotify_add_watch failed, using polling fallback");
-        close(fd);
-        g_watch.use_polling = 1;
-        g_watch.fd = -1;
-        strncpy(g_watch.watch_dir, dir, MAX_PATH - 1);
-        return 0;
-    }
-
-    g_watch.fd = fd;
-    g_watch.use_polling = 0;
-    strncpy(g_watch.watch_dir, dir, MAX_PATH - 1);
-    log_info("Using inotify for file watching");
-    return fd;
-}
-
-static int poll_events_inotify(void) {
-    char buffer[4096];
-
-    ssize_t len = read(g_watch.fd, buffer, sizeof(buffer));
-    if (len < 0) {
-        if (errno == EAGAIN) return 0;
-        return -1;
-    }
-
-    int events = 0;
-    ssize_t i = 0;
-    while (i < len) {
-        struct inotify_event *event = (struct inotify_event *)&buffer[i];
-
-        if (event->len > 0) {
-            const char *name = event->name;
-            size_t nlen = strlen(name);
-
-            /* Check for .c file */
-            if (nlen > 2 && strcmp(name + nlen - 2, ".c") == 0) {
-                usleep(50000);  /* Debounce */
-                log_info("File changed: %s", name);
-                handle_file_change((char *)name);
-                events++;
-            }
-        }
-
-        i += sizeof(struct inotify_event) + event->len;
-    }
-
-    return events;
-}
-
-#elif defined(USE_KQUEUE)
-/* macOS/BSD: kqueue backend */
-static int g_kq_fd = -1;
-static int g_watch_fd = -1;
-
-static int setup_watch(const char *dir) {
-    g_kq_fd = kqueue();
-    if (g_kq_fd < 0) {
-        log_info("kqueue unavailable, using polling fallback");
-        g_watch.use_polling = 1;
-        g_watch.fd = -1;
-        strncpy(g_watch.watch_dir, dir, MAX_PATH - 1);
-        return 0;
-    }
-
-    /* Watch the directory */
-    g_watch_fd = open(dir, O_RDONLY);
-    if (g_watch_fd < 0) {
-        log_info("Cannot open dir for kqueue, using polling fallback");
-        close(g_kq_fd);
-        g_watch.use_polling = 1;
-        g_watch.fd = -1;
-        strncpy(g_watch.watch_dir, dir, MAX_PATH - 1);
-        return 0;
-    }
-
-    struct kevent change;
-    EV_SET(&change, g_watch_fd, EVFILT_VNODE,
-           EV_ADD | EV_ENABLE | EV_CLEAR,
-           NOTE_WRITE | NOTE_EXTEND | NOTE_ATTRIB,
-           0, NULL);
-
-    if (kevent(g_kq_fd, &change, 1, NULL, 0, NULL) < 0) {
-        log_info("kevent registration failed, using polling fallback");
-        close(g_watch_fd);
-        close(g_kq_fd);
-        g_watch.use_polling = 1;
-        g_watch.fd = -1;
-        strncpy(g_watch.watch_dir, dir, MAX_PATH - 1);
-        return 0;
-    }
-
-    g_watch.fd = g_kq_fd;
-    g_watch.use_polling = 0;
-    strncpy(g_watch.watch_dir, dir, MAX_PATH - 1);
-    log_info("Using kqueue for file watching");
-    return g_kq_fd;
-}
-
-static int poll_events_kqueue(void) {
-    struct kevent event;
-    struct timespec timeout = {0, 0};  /* Non-blocking */
-
-    int n = kevent(g_kq_fd, NULL, 0, &event, 1, &timeout);
-    if (n <= 0) return 0;
-
-    /* Directory changed - check for .c file modifications */
-    /* kqueue doesn't tell us which file, so check mtime of watched file */
-    if (g_watch.watch_file[0] != '\0') {
-        time_t mtime = get_mtime(g_watch.watch_file);
-        if (mtime > g_watch.last_mtime) {
-            g_watch.last_mtime = mtime;
-            usleep(50000);  /* Debounce */
-            log_info("File changed: %s", g_watch.watch_file);
-            handle_file_change(g_watch.watch_file);
-            return 1;
-        }
-    }
-
-    return 0;
-}
-
-#else
-/* APE/Windows/other: polling fallback only */
-static int setup_watch(const char *dir) {
-    g_watch.use_polling = 1;
-    g_watch.fd = -1;
-    strncpy(g_watch.watch_dir, dir, MAX_PATH - 1);
-    log_info("Using stat-based polling for file watching (portable)");
-    return 0;
-}
-#endif
-
-/* Universal polling fallback */
-static int poll_events_stat(void) {
-    if (g_watch.watch_file[0] == '\0') return 0;
-
-    time_t mtime = get_mtime(g_watch.watch_file);
-    if (mtime > g_watch.last_mtime) {
-        g_watch.last_mtime = mtime;
-        usleep(50000);  /* Debounce */
-        log_info("File changed: %s", g_watch.watch_file);
-        handle_file_change(g_watch.watch_file);
+    time_t mtime = get_mtime(g_watch_file);
+    if (mtime > g_last_mtime) {
+        g_last_mtime = mtime;
+        usleep(50000);  /* Debounce: wait for file to be fully written */
+        log_info("File changed: %s", g_watch_file);
+        handle_file_change(g_watch_file);
         return 1;
     }
 
     return 0;
-}
-
-/* Unified poll function */
-static int poll_events(int fd) {
-    (void)fd;  /* May be unused depending on platform */
-
-    if (g_watch.use_polling) {
-        return poll_events_stat();
-    }
-
-#if defined(USE_INOTIFY)
-    return poll_events_inotify();
-#elif defined(USE_KQUEUE)
-    return poll_events_kqueue();
-#else
-    return poll_events_stat();
-#endif
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -819,15 +618,10 @@ int main(int argc, char **argv) {
     printf("\n");
     printf("───────────────────────────────────────────────────────────────────────\n");
 
-    /* Setup file watch */
-    int watch_fd = setup_watch(".");
-    if (watch_fd < 0 && !g_watch.use_polling) {
-        return 1;
-    }
-
-    /* Initialize watch file for polling/kqueue backends */
-    strncpy(g_watch.watch_file, source_file, MAX_PATH - 1);
-    g_watch.last_mtime = get_mtime(source_file);
+    /* Initialize file watching */
+    strncpy(g_watch_file, source_file, MAX_PATH - 1);
+    g_last_mtime = get_mtime(source_file);
+    log_info("Watching %s (polling every 100ms)", source_file);
 
     /* Initial compilation */
     char initial_obj[MAX_PATH];
@@ -838,20 +632,10 @@ int main(int argc, char **argv) {
 
     /* Main loop */
     while (g_running) {
-        poll_events(watch_fd);
+        poll_events();
         usleep(100000);  /* 100ms */
     }
 
-    /* Cleanup watch resources */
-    if (g_watch.fd >= 0) {
-        close(g_watch.fd);
-    }
-#if defined(__APPLE__) || defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
-    if (g_watch_fd >= 0) {
-        close(g_watch_fd);
-    }
-#endif
-    (void)watch_fd;  /* May be unused */
     print_stats();
 
     return 0;
