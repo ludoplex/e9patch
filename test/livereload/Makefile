@@ -31,13 +31,25 @@ INCLUDES = -I$(E9PATCH_DIR) -I$(WASM_DIR) -I$(GEN_DIR) -I$(WAMR_INCLUDE) -I$(WAM
 # WAMR source files
 WAMR_SRCS = $(WAMR_COMMON)/wasm_runtime_common.c $(WAMR_PLATFORM)/platform_init.c
 
-# Generated types (from e9studio)
-GEN_DIR = ../../gen/domain
-GEN_TYPES = $(GEN_DIR)/e9livereload_types.c
+# Generated types (from cosmicringforge root)
+# Path: upstream/e9studio/test/livereload -> ../../../../gen/domain
+GEN_DIR = ../../../../gen/domain
+GEN_TYPES = $(GEN_DIR)/livereload_types.c
 
-.PHONY: all clean native ape test demo simple
+.PHONY: all clean native ape test demo simple standalone
 
 all: native
+
+# Standalone livereload (ptrace-based, uses cosmicringforge generated types)
+standalone: target livereload
+	@echo "Standalone build complete (ptrace-based live reload)"
+	@echo "  ./target     - Test target program"
+	@echo "  ./livereload - Live reload with hot-patching"
+	@echo ""
+	@echo "Usage: sudo ./livereload <PID> [source_file]"
+
+livereload: livereload.c $(GEN_TYPES)
+	$(CC) $(CFLAGS) -I$(GEN_DIR) -o $@ $^
 
 # Simple test (no WAMR dependency) - quick proof of concept
 simple: target test_simple
@@ -92,5 +104,6 @@ test: native
 	@echo "No unit tests yet"
 
 clean:
-	rm -f target test_livereload target.ape test_livereload.ape
+	rm -f target test_livereload target.ape test_livereload.ape livereload test_simple
 	rm -f *.o
+	rm -rf .e9cache
