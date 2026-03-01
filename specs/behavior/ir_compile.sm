@@ -1,0 +1,257 @@
+# IR Compile State Machine
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# State machine for selective compilation of changed functions.
+# Only compiles functions that changed, skipping unchanged code.
+#
+# Input to smgen: generates ir_compile_sm.c,h
+#
+# Usage: ./build/smgen specs/behavior/ir_compile.sm gen/behavior ir_compile
+#
+# ═══════════════════════════════════════════════════════════════════════════
+
+@name IRCompile
+@prefix ircompile
+@initial INIT
+
+# ─── States ─────────────────────────────────────────────────────────────────
+
+state INIT {
+    doc "Initialize compile context"
+    entry alloc_context
+    on START -> SELECT_FUNCS : load_changes
+}
+
+state SELECT_FUNCS {
+    doc "Select changed functions for compilation"
+    entry filter_changes
+    on FUNCS_SELECTED -> GEN_STUBS : prepare_stubs
+    on NO_CHANGES -> DONE : skip_compile
+}
+
+state GEN_STUBS {
+    doc "Generate stub declarations for unchanged functions"
+    entry gen_extern_decls
+    on STUBS_READY -> CODEGEN : begin_codegen
+}
+
+state CODEGEN {
+    doc "Compile only changed function bodies"
+    entry invoke_compiler
+    on COMPILE_OK -> EXTRACT : begin_extract
+    on COMPILE_FAIL -> ERROR : record_compile_error
+}
+
+state EXTRACT {
+    doc "Extract machine code from compiled object"
+    entry extract_code
+    on EXTRACT_OK -> BUILD_PATCHES : build_patch_data
+    on EXTRACT_FAIL -> ERROR : record_extract_error
+}
+
+state BUILD_PATCHES {
+    doc "Build patch structures with offsets and bytes"
+    entry create_patches
+    on PATCHES_READY -> DONE : finalize
+}
+
+state DONE {
+    doc "Compilation complete, patches ready"
+    entry log_summary
+    on RESET -> INIT : cleanup
+    on GET_PATCHES -> DONE : return_patches
+}
+
+state ERROR {
+    doc "Compilation error"
+    entry log_error
+    on RESET -> INIT : cleanup
+    on RETRY -> SELECT_FUNCS : retry_compile
+}
+
+# ─── Events ─────────────────────────────────────────────────────────────────
+
+event START          "Begin compilation with change list"
+event FUNCS_SELECTED "Functions selected for compilation"
+event NO_CHANGES     "No functions need recompilation"
+event STUBS_READY    "Stub declarations generated"
+event COMPILE_OK     "Compilation succeeded"
+event COMPILE_FAIL   "Compilation failed"
+event EXTRACT_OK     "Code extraction succeeded"
+event EXTRACT_FAIL   "Code extraction failed"
+event PATCHES_READY  "Patches built"
+event RESET          "Reset for next compilation"
+event GET_PATCHES    "Get patch list"
+event RETRY          "Retry failed compilation"
+
+# ─── Actions ────────────────────────────────────────────────────────────────
+
+action alloc_context {
+    doc "Allocate compile context"
+    code {
+        ctx->changes = NULL;
+        ctx->change_count = 0;
+        ctx->patches = NULL;
+        ctx->patch_count = 0;
+        ctx->temp_dir = NULL;
+    }
+}
+
+action load_changes {
+    doc "Load list of changed functions"
+    code {
+        ctx->changes = diff_result->changes;
+        ctx->change_count = diff_result->change_count;
+    }
+}
+
+action filter_changes {
+    doc "Filter to only ADDED and MODIFIED functions"
+    code {
+        // Skip REMOVED functions (handled separately)
+        ctx->compile_count = 0;
+        for (int i = 0; i < ctx->change_count; i++) {
+            if (ctx->changes[i].type != CHANGE_REMOVED) {
+                ctx->to_compile[ctx->compile_count++] = &ctx->changes[i];
+            }
+        }
+    }
+}
+
+action prepare_stubs {
+    doc "Prepare for stub generation"
+}
+
+action skip_compile {
+    doc "Skip compilation when no changes"
+}
+
+action gen_extern_decls {
+    doc "Generate extern declarations for unchanged functions"
+    code {
+        // For each function NOT in changes:
+        //   emit "extern return_type func_name(params);"
+        // This allows changed functions to call unchanged ones
+    }
+}
+
+action begin_codegen {
+    doc "Begin code generation"
+}
+
+action invoke_compiler {
+    doc "Invoke compiler on changed functions"
+    code {
+        // Create temp source file with:
+        //   - Extern stubs
+        //   - Changed function bodies (from new AST)
+        // Compile with: cosmocc -c -ffunction-sections
+
+        // Option: Use TinyCC for faster compilation
+        #ifdef USE_TCC
+            tcc_compile_string(tcc, source);
+        #else
+            system("cosmocc -c -ffunction-sections ...");
+        #endif
+    }
+}
+
+action record_compile_error {
+    doc "Record compilation error"
+    code {
+        ctx->error_msg = "compilation failed";
+        ctx->error_line = parse_error_line(compiler_output);
+    }
+}
+
+action begin_extract {
+    doc "Begin code extraction from object"
+}
+
+action extract_code {
+    doc "Extract machine code bytes from object file"
+    code {
+        // For each changed function:
+        //   - Find in symbol table
+        //   - Get section offset and size
+        //   - Copy bytes to patch buffer
+    }
+}
+
+action record_extract_error {
+    doc "Record extraction error"
+}
+
+action create_patches {
+    doc "Create IRPatch structures"
+    code {
+        ctx->patches = malloc(ctx->compile_count * sizeof(IRPatch));
+        for (int i = 0; i < ctx->compile_count; i++) {
+            IRPatch *p = &ctx->patches[i];
+            p->func_name = ctx->to_compile[i]->name;
+            p->old_addr = ctx->to_compile[i]->old_addr;
+            p->new_bytes = extracted_bytes[i];
+            p->size = extracted_sizes[i];
+        }
+        ctx->patch_count = ctx->compile_count;
+    }
+}
+
+action build_patch_data {
+    doc "Build final patch data"
+}
+
+action finalize {
+    doc "Finalize patches"
+}
+
+action log_summary {
+    doc "Log compilation summary"
+    code {
+        printf("IR compile: %d functions, %zu bytes\n",
+               ctx->patch_count, ctx->total_bytes);
+    }
+}
+
+action return_patches {
+    doc "Return patch list to caller"
+}
+
+action log_error {
+    doc "Log error"
+}
+
+action cleanup {
+    doc "Cleanup resources"
+    code {
+        free(ctx->patches);
+        remove_temp_files(ctx->temp_dir);
+    }
+}
+
+action retry_compile {
+    doc "Retry compilation"
+}
+
+# ─── Guards ─────────────────────────────────────────────────────────────────
+
+guard has_changes {
+    doc "Check if there are functions to compile"
+    code {
+        return ctx->compile_count > 0;
+    }
+}
+
+guard compile_succeeded {
+    doc "Check if compilation succeeded"
+    code {
+        return ctx->compile_status == 0;
+    }
+}
+
+guard use_tcc {
+    doc "Check if TinyCC is available and enabled"
+    code {
+        return ctx->config.use_tcc && tcc_available();
+    }
+}

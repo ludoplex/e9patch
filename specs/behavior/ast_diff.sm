@@ -1,0 +1,197 @@
+# AST Diff State Machine
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# State machine for comparing two ASTs to find changed functions.
+# Part of IR-based live reload for lower latency patching.
+#
+# Input to smgen: generates ast_diff_sm.c,h
+#
+# Usage: ./build/smgen specs/behavior/ast_diff.sm gen/behavior ast_diff
+#
+# ═══════════════════════════════════════════════════════════════════════════
+
+@name ASTDiff
+@prefix astdiff
+@initial INIT
+
+# ─── States ─────────────────────────────────────────────────────────────────
+
+state INIT {
+    doc "Initialize diff context"
+    entry alloc_context
+    on START -> PARSE_OLD : set_old_source
+}
+
+state PARSE_OLD {
+    doc "Parse old source file to AST"
+    entry begin_parse_old
+    on PARSE_OK -> PARSE_NEW : store_old_ast
+    on PARSE_FAIL -> ERROR : record_parse_error
+}
+
+state PARSE_NEW {
+    doc "Parse new source file to AST"
+    entry begin_parse_new
+    on PARSE_OK -> HASH_FUNCS : store_new_ast
+    on PARSE_FAIL -> ERROR : record_parse_error
+}
+
+state HASH_FUNCS {
+    doc "Compute content hashes for all functions"
+    entry walk_functions
+    on HASH_DONE -> COMPARE : store_hashes
+}
+
+state COMPARE {
+    doc "Compare function hashes to detect changes"
+    entry compare_hashes
+    on COMPARE_DONE -> DONE : build_change_list
+}
+
+state DONE {
+    doc "Diff complete, changes available"
+    entry log_summary
+    on RESET -> INIT : cleanup
+    on GET_CHANGES -> DONE : return_changes
+}
+
+state ERROR {
+    doc "Error state"
+    entry log_error
+    on RESET -> INIT : cleanup
+}
+
+# ─── Events ─────────────────────────────────────────────────────────────────
+
+event START         "Begin diff with source paths"
+event PARSE_OK      "Parsing succeeded"
+event PARSE_FAIL    "Parsing failed"
+event HASH_DONE     "All functions hashed"
+event COMPARE_DONE  "Comparison complete"
+event RESET         "Reset for new diff"
+event GET_CHANGES   "Retrieve change list"
+
+# ─── Actions ────────────────────────────────────────────────────────────────
+
+action alloc_context {
+    doc "Allocate diff context"
+    code {
+        ctx->old_ast = NULL;
+        ctx->new_ast = NULL;
+        ctx->changes = NULL;
+        ctx->change_count = 0;
+    }
+}
+
+action set_old_source {
+    doc "Set path to old source file"
+}
+
+action begin_parse_old {
+    doc "Start parsing old source"
+    code {
+        ctx->old_ast = c11_parse_file(ctx->old_path, ctx->config);
+    }
+}
+
+action store_old_ast {
+    doc "Store parsed old AST"
+}
+
+action begin_parse_new {
+    doc "Start parsing new source"
+    code {
+        ctx->new_ast = c11_parse_file(ctx->new_path, ctx->config);
+    }
+}
+
+action store_new_ast {
+    doc "Store parsed new AST"
+}
+
+action record_parse_error {
+    doc "Record parse error for reporting"
+    code {
+        ctx->error_msg = c11_get_parse_error();
+    }
+}
+
+action walk_functions {
+    doc "Walk both ASTs and hash all function bodies"
+    code {
+        // Walk old AST
+        for_each_function(ctx->old_ast, hash_function_body, ctx->old_hashes);
+        // Walk new AST
+        for_each_function(ctx->new_ast, hash_function_body, ctx->new_hashes);
+    }
+}
+
+action store_hashes {
+    doc "Store computed hashes"
+}
+
+action compare_hashes {
+    doc "Compare hashes to find changed functions"
+    code {
+        // For each function in new:
+        //   - If not in old: ADDED
+        //   - If hash differs: MODIFIED
+        // For each function in old not in new: REMOVED
+    }
+}
+
+action build_change_list {
+    doc "Build list of FuncChange structs"
+    code {
+        ctx->changes = malloc(ctx->change_count * sizeof(FuncChange));
+        // Populate from comparison results
+    }
+}
+
+action log_summary {
+    doc "Log diff summary"
+    code {
+        printf("AST diff: %d added, %d modified, %d removed\n",
+               ctx->added, ctx->modified, ctx->removed);
+    }
+}
+
+action return_changes {
+    doc "Return change list to caller"
+}
+
+action log_error {
+    doc "Log error message"
+}
+
+action cleanup {
+    doc "Free allocated resources"
+    code {
+        c11_free_ast(ctx->old_ast);
+        c11_free_ast(ctx->new_ast);
+        free(ctx->changes);
+    }
+}
+
+# ─── Guards ─────────────────────────────────────────────────────────────────
+
+guard old_parse_ok {
+    doc "Check if old AST parsed successfully"
+    code {
+        return ctx->old_ast != NULL && ctx->old_ast->errors == 0;
+    }
+}
+
+guard new_parse_ok {
+    doc "Check if new AST parsed successfully"
+    code {
+        return ctx->new_ast != NULL && ctx->new_ast->errors == 0;
+    }
+}
+
+guard has_changes {
+    doc "Check if any functions changed"
+    code {
+        return ctx->change_count > 0;
+    }
+}

@@ -1,0 +1,608 @@
+/* c11.grammar - C11 Grammar for Lemon Parser Generator
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * LALR(1) grammar for C11 subset used in IR-based live reload.
+ * Input to Lemon: generates c11_parse.c,h
+ *
+ * Usage: ./build/lemon specs/parsing/c11.grammar
+ *        mv c11_parse.c c11_parse.h gen/parsing/
+ *
+ * Design Notes:
+ * - Abstract C version via @c_standard directive (C89, C99, C11, C23)
+ * - Base target: C11 (Cosmopolitan libc compatibility)
+ * - Focus on function-level parsing for AST diffing
+ * - Skip preprocessor (assume already processed)
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+
+%name C11Parse
+%token_prefix C11_TOK_
+%include {
+#include <stdio.h>
+#include <stdlib.h>
+#include <string.h>
+#include "c11_tokens.h"
+#include "c11_ast_types.h"
+
+/* Parser context */
+typedef struct {
+    C11_ASTNode *root;
+    C11_ASTNode *current;
+    const char *filename;
+    int errors;
+
+    /* C standard selection (abstract version) */
+    int c_standard;  /* 89, 99, 11, 23 */
+} C11ParseContext;
+
+#define CTX ((C11ParseContext*)ctx)
+
+/* Forward declarations */
+static C11_ASTNode* make_node(C11ParseContext *ctx, C11_ASTKind kind);
+static void set_location(C11_ASTNode *node, int line, int col);
+static void add_child(C11_ASTNode *parent, C11_ASTNode *child);
+}
+
+%extra_argument { C11ParseContext *ctx }
+%token_type { C11Token }
+%default_type { C11_ASTNode* }
+
+%syntax_error {
+    CTX->errors++;
+    fprintf(stderr, "%s:%d: syntax error\n", CTX->filename, TOKEN.line);
+}
+
+%parse_failure {
+    fprintf(stderr, "%s: parse failed\n", CTX->filename);
+}
+
+/* ─── Precedence (lowest to highest) ──────────────────────────────────────── */
+
+%left COMMA.
+%right EQ PLUSEQ MINUSEQ STAREQ SLASHEQ PERCENTEQ AMPEQ PIPEEQ CARETEQ LTLTEQ GTGTEQ.
+%right QUESTION COLON.
+%left PIPEPIPE.
+%left AMPAMP.
+%left PIPE.
+%left CARET.
+%left AMP.
+%left EQEQ BANGEQ.
+%left LT GT LTEQ GTEQ.
+%left LTLT GTGT.
+%left PLUS MINUS.
+%left STAR SLASH PERCENT.
+%right BANG TILDE PLUSPLUS MINUSMINUS SIZEOF.
+%left ARROW DOT LPAREN LBRACKET.
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Translation Unit (Top Level)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+translation_unit ::= external_declaration_list(L). {
+    CTX->root = make_node(CTX, C11_AST_TRANSLATION_UNIT);
+    CTX->root->child = L;
+}
+
+external_declaration_list(A) ::= external_declaration(D). {
+    A = D;
+}
+external_declaration_list(A) ::= external_declaration_list(L) external_declaration(D). {
+    /* Append D to end of L's sibling chain */
+    C11_ASTNode *last = L;
+    while (last->next) last = last->next;
+    last->next = D;
+    A = L;
+}
+
+external_declaration(A) ::= function_definition(F). { A = F; }
+external_declaration(A) ::= declaration(D). { A = D; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Function Definition
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+function_definition(A) ::= declaration_specifiers(S) declarator(D) compound_statement(B). {
+    A = make_node(CTX, C11_AST_FUNCTION_DEF);
+    C11_FunctionDef *fn = (C11_FunctionDef*)A;
+    fn->return_type = (C11_TypeSpec*)S;
+    /* D contains name and params */
+    fn->body = (C11_CompoundStmt*)B;
+    /* Compute hash for diffing */
+    fn->hash = c11_compute_hash(B);
+}
+
+/* With storage class (static, inline, etc.) */
+function_definition(A) ::= storage_class_specifier(SC) declaration_specifiers(S) declarator(D) compound_statement(B). {
+    A = make_node(CTX, C11_AST_FUNCTION_DEF);
+    C11_FunctionDef *fn = (C11_FunctionDef*)A;
+    fn->return_type = (C11_TypeSpec*)S;
+    fn->body = (C11_CompoundStmt*)B;
+    fn->is_static = (SC == C11_TOK_STATIC);
+    fn->is_inline = (SC == C11_TOK_INLINE);
+    fn->hash = c11_compute_hash(B);
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Declaration Specifiers (Type + Qualifiers)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+declaration_specifiers(A) ::= type_specifier(T). { A = T; }
+declaration_specifiers(A) ::= type_qualifier(Q) declaration_specifiers(S). {
+    /* Merge qualifier into specifier */
+    C11_TypeSpec *ts = (C11_TypeSpec*)S;
+    if (Q == C11_TOK_CONST) ts->is_const = 1;
+    if (Q == C11_TOK_VOLATILE) ts->is_volatile = 1;
+    A = S;
+}
+declaration_specifiers(A) ::= type_specifier(T) declaration_specifiers(S). {
+    /* Combine type specifiers (e.g., unsigned int) */
+    A = T; /* simplified */
+}
+
+type_specifier(A) ::= VOID. {
+    A = make_node(CTX, C11_AST_TYPE_SPEC);
+    ((C11_TypeSpec*)A)->base_type = C11_TYPE_VOID;
+}
+type_specifier(A) ::= CHAR. {
+    A = make_node(CTX, C11_AST_TYPE_SPEC);
+    ((C11_TypeSpec*)A)->base_type = C11_TYPE_CHAR;
+}
+type_specifier(A) ::= SHORT. {
+    A = make_node(CTX, C11_AST_TYPE_SPEC);
+    ((C11_TypeSpec*)A)->base_type = C11_TYPE_SHORT;
+}
+type_specifier(A) ::= INT. {
+    A = make_node(CTX, C11_AST_TYPE_SPEC);
+    ((C11_TypeSpec*)A)->base_type = C11_TYPE_INT;
+}
+type_specifier(A) ::= LONG. {
+    A = make_node(CTX, C11_AST_TYPE_SPEC);
+    ((C11_TypeSpec*)A)->base_type = C11_TYPE_LONG;
+}
+type_specifier(A) ::= FLOAT. {
+    A = make_node(CTX, C11_AST_TYPE_SPEC);
+    ((C11_TypeSpec*)A)->base_type = C11_TYPE_FLOAT;
+}
+type_specifier(A) ::= DOUBLE. {
+    A = make_node(CTX, C11_AST_TYPE_SPEC);
+    ((C11_TypeSpec*)A)->base_type = C11_TYPE_DOUBLE;
+}
+type_specifier(A) ::= SIGNED. {
+    A = make_node(CTX, C11_AST_TYPE_SPEC);
+    ((C11_TypeSpec*)A)->base_type = C11_TYPE_SIGNED;
+}
+type_specifier(A) ::= UNSIGNED. {
+    A = make_node(CTX, C11_AST_TYPE_SPEC);
+    ((C11_TypeSpec*)A)->base_type = C11_TYPE_UNSIGNED;
+}
+type_specifier(A) ::= IDENT(I). {
+    /* typedef'd type */
+    A = make_node(CTX, C11_AST_TYPE_SPEC);
+    C11_TypeSpec *ts = (C11_TypeSpec*)A;
+    ts->base_type = C11_TYPE_TYPEDEF;
+    strncpy(ts->typedef_name, I.text, sizeof(ts->typedef_name)-1);
+}
+
+type_qualifier(A) ::= CONST. { A = C11_TOK_CONST; }
+type_qualifier(A) ::= VOLATILE. { A = C11_TOK_VOLATILE; }
+type_qualifier(A) ::= RESTRICT. { A = C11_TOK_RESTRICT; }
+
+storage_class_specifier(A) ::= STATIC. { A = C11_TOK_STATIC; }
+storage_class_specifier(A) ::= EXTERN. { A = C11_TOK_EXTERN; }
+storage_class_specifier(A) ::= INLINE. { A = C11_TOK_INLINE; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Declarator (Name + Pointers + Array/Function)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+declarator(A) ::= direct_declarator(D). { A = D; }
+declarator(A) ::= STAR declarator(D). {
+    /* Pointer declarator */
+    if (D->kind == C11_AST_TYPE_SPEC) {
+        ((C11_TypeSpec*)D)->is_pointer = 1;
+        ((C11_TypeSpec*)D)->pointer_depth++;
+    }
+    A = D;
+}
+declarator(A) ::= STAR type_qualifier_list declarator(D). {
+    /* const/volatile pointer */
+    A = D;
+}
+
+direct_declarator(A) ::= IDENT(I). {
+    A = make_node(CTX, C11_AST_IDENT);
+    strncpy(((C11_Ident*)A)->name, I.text, sizeof(((C11_Ident*)A)->name)-1);
+}
+direct_declarator(A) ::= LPAREN declarator(D) RPAREN. { A = D; }
+direct_declarator(A) ::= direct_declarator(D) LPAREN parameter_list(P) RPAREN. {
+    /* Function declarator */
+    A = D;
+    /* Attach parameter list */
+}
+direct_declarator(A) ::= direct_declarator(D) LPAREN RPAREN. {
+    /* No-parameter function */
+    A = D;
+}
+direct_declarator(A) ::= direct_declarator(D) LBRACKET assignment_expression(E) RBRACKET. {
+    /* Array declarator */
+    A = D;
+}
+direct_declarator(A) ::= direct_declarator(D) LBRACKET RBRACKET. {
+    /* Unsized array */
+    A = D;
+}
+
+type_qualifier_list ::= type_qualifier.
+type_qualifier_list ::= type_qualifier_list type_qualifier.
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Parameters
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+parameter_list(A) ::= parameter_declaration(P). {
+    A = make_node(CTX, C11_AST_PARAM_LIST);
+    add_child(A, P);
+}
+parameter_list(A) ::= parameter_list(L) COMMA parameter_declaration(P). {
+    add_child(L, P);
+    A = L;
+}
+parameter_list(A) ::= parameter_list(L) COMMA ELLIPSIS. {
+    ((C11_ParamList*)L)->is_variadic = 1;
+    A = L;
+}
+
+parameter_declaration(A) ::= declaration_specifiers(S) declarator(D). {
+    A = make_node(CTX, C11_AST_PARAM);
+    C11_Param *p = (C11_Param*)A;
+    p->type = (C11_TypeSpec*)S;
+    /* Get name from D */
+}
+parameter_declaration(A) ::= declaration_specifiers(S). {
+    /* Abstract parameter (no name) */
+    A = make_node(CTX, C11_AST_PARAM);
+    ((C11_Param*)A)->type = (C11_TypeSpec*)S;
+}
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Statements
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+compound_statement(A) ::= LBRACE RBRACE. {
+    A = make_node(CTX, C11_AST_COMPOUND_STMT);
+}
+compound_statement(A) ::= LBRACE block_item_list(L) RBRACE. {
+    A = make_node(CTX, C11_AST_COMPOUND_STMT);
+    A->child = L;
+}
+
+block_item_list(A) ::= block_item(I). { A = I; }
+block_item_list(A) ::= block_item_list(L) block_item(I). {
+    C11_ASTNode *last = L;
+    while (last->next) last = last->next;
+    last->next = I;
+    A = L;
+}
+
+block_item(A) ::= declaration(D). { A = D; }
+block_item(A) ::= statement(S). { A = S; }
+
+statement(A) ::= compound_statement(S). { A = S; }
+statement(A) ::= expression_statement(S). { A = S; }
+statement(A) ::= selection_statement(S). { A = S; }
+statement(A) ::= iteration_statement(S). { A = S; }
+statement(A) ::= jump_statement(S). { A = S; }
+
+expression_statement(A) ::= SEMI. {
+    A = make_node(CTX, C11_AST_EXPR_STMT);
+}
+expression_statement(A) ::= expression(E) SEMI. {
+    A = make_node(CTX, C11_AST_EXPR_STMT);
+    ((C11_ExprStmt*)A)->expr = E;
+}
+
+selection_statement(A) ::= IF LPAREN expression(E) RPAREN statement(T). {
+    A = make_node(CTX, C11_AST_IF_STMT);
+    C11_IfStmt *s = (C11_IfStmt*)A;
+    s->condition = E;
+    s->then_branch = T;
+}
+selection_statement(A) ::= IF LPAREN expression(E) RPAREN statement(T) ELSE statement(L). {
+    A = make_node(CTX, C11_AST_IF_STMT);
+    C11_IfStmt *s = (C11_IfStmt*)A;
+    s->condition = E;
+    s->then_branch = T;
+    s->else_branch = L;
+}
+
+iteration_statement(A) ::= WHILE LPAREN expression(E) RPAREN statement(S). {
+    A = make_node(CTX, C11_AST_WHILE_STMT);
+    C11_WhileStmt *w = (C11_WhileStmt*)A;
+    w->condition = E;
+    w->body = S;
+}
+iteration_statement(A) ::= FOR LPAREN expression_opt(I) SEMI expression_opt(C) SEMI expression_opt(U) RPAREN statement(B). {
+    A = make_node(CTX, C11_AST_FOR_STMT);
+    C11_ForStmt *f = (C11_ForStmt*)A;
+    f->init = I;
+    f->condition = C;
+    f->increment = U;
+    f->body = B;
+}
+
+jump_statement(A) ::= RETURN SEMI. {
+    A = make_node(CTX, C11_AST_RETURN_STMT);
+}
+jump_statement(A) ::= RETURN expression(E) SEMI. {
+    A = make_node(CTX, C11_AST_RETURN_STMT);
+    ((C11_ReturnStmt*)A)->expr = E;
+}
+jump_statement(A) ::= BREAK SEMI. {
+    A = make_node(CTX, C11_AST_EXPR_STMT); /* simplified */
+}
+jump_statement(A) ::= CONTINUE SEMI. {
+    A = make_node(CTX, C11_AST_EXPR_STMT); /* simplified */
+}
+
+expression_opt(A) ::= . { A = NULL; }
+expression_opt(A) ::= expression(E). { A = E; }
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Declarations (Variable Declarations)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+declaration(A) ::= declaration_specifiers(S) init_declarator_list(L) SEMI. {
+    A = L;
+    /* Attach type to each declarator */
+}
+declaration(A) ::= declaration_specifiers(S) SEMI. {
+    A = S; /* Forward declaration */
+}
+
+init_declarator_list(A) ::= init_declarator(D). { A = D; }
+init_declarator_list(A) ::= init_declarator_list(L) COMMA init_declarator(D). {
+    C11_ASTNode *last = L;
+    while (last->next) last = last->next;
+    last->next = D;
+    A = L;
+}
+
+init_declarator(A) ::= declarator(D). {
+    A = make_node(CTX, C11_AST_VAR_DECL);
+    /* Get name from D */
+}
+init_declarator(A) ::= declarator(D) EQ initializer(I). {
+    A = make_node(CTX, C11_AST_VAR_DECL);
+    ((C11_VarDecl*)A)->init = I;
+}
+
+initializer(A) ::= assignment_expression(E). { A = E; }
+initializer(A) ::= LBRACE initializer_list RBRACE. { A = NULL; /* simplified */ }
+
+initializer_list ::= initializer.
+initializer_list ::= initializer_list COMMA initializer.
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Expressions
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+expression(A) ::= assignment_expression(E). { A = E; }
+expression(A) ::= expression(L) COMMA assignment_expression(R). {
+    A = make_node(CTX, C11_AST_BINARY_EXPR);
+    C11_BinaryExpr *e = (C11_BinaryExpr*)A;
+    e->op = C11_OP_COMMA;
+    e->left = L;
+    e->right = R;
+}
+
+assignment_expression(A) ::= conditional_expression(E). { A = E; }
+assignment_expression(A) ::= unary_expression(L) EQ assignment_expression(R). {
+    A = make_node(CTX, C11_AST_BINARY_EXPR);
+    C11_BinaryExpr *e = (C11_BinaryExpr*)A;
+    e->op = C11_OP_ASSIGN;
+    e->left = L;
+    e->right = R;
+}
+/* Add other assignment operators (+=, -=, etc.) similarly */
+
+conditional_expression(A) ::= logical_or_expression(E). { A = E; }
+conditional_expression(A) ::= logical_or_expression(C) QUESTION expression(T) COLON conditional_expression(F). {
+    /* Ternary - simplified */
+    A = C;
+}
+
+logical_or_expression(A) ::= logical_and_expression(E). { A = E; }
+logical_or_expression(A) ::= logical_or_expression(L) PIPEPIPE logical_and_expression(R). {
+    A = make_node(CTX, C11_AST_BINARY_EXPR);
+    C11_BinaryExpr *e = (C11_BinaryExpr*)A;
+    e->op = C11_OP_OR;
+    e->left = L;
+    e->right = R;
+}
+
+logical_and_expression(A) ::= inclusive_or_expression(E). { A = E; }
+logical_and_expression(A) ::= logical_and_expression(L) AMPAMP inclusive_or_expression(R). {
+    A = make_node(CTX, C11_AST_BINARY_EXPR);
+    C11_BinaryExpr *e = (C11_BinaryExpr*)A;
+    e->op = C11_OP_AND;
+    e->left = L;
+    e->right = R;
+}
+
+inclusive_or_expression(A) ::= exclusive_or_expression(E). { A = E; }
+exclusive_or_expression(A) ::= and_expression(E). { A = E; }
+and_expression(A) ::= equality_expression(E). { A = E; }
+
+equality_expression(A) ::= relational_expression(E). { A = E; }
+equality_expression(A) ::= equality_expression(L) EQEQ relational_expression(R). {
+    A = make_node(CTX, C11_AST_BINARY_EXPR);
+    C11_BinaryExpr *e = (C11_BinaryExpr*)A;
+    e->op = C11_OP_EQ;
+    e->left = L;
+    e->right = R;
+}
+equality_expression(A) ::= equality_expression(L) BANGEQ relational_expression(R). {
+    A = make_node(CTX, C11_AST_BINARY_EXPR);
+    C11_BinaryExpr *e = (C11_BinaryExpr*)A;
+    e->op = C11_OP_NE;
+    e->left = L;
+    e->right = R;
+}
+
+relational_expression(A) ::= shift_expression(E). { A = E; }
+relational_expression(A) ::= relational_expression(L) LT shift_expression(R). {
+    A = make_node(CTX, C11_AST_BINARY_EXPR);
+    C11_BinaryExpr *e = (C11_BinaryExpr*)A;
+    e->op = C11_OP_LT;
+    e->left = L;
+    e->right = R;
+}
+/* Add GT, LTEQ, GTEQ similarly */
+
+shift_expression(A) ::= additive_expression(E). { A = E; }
+additive_expression(A) ::= multiplicative_expression(E). { A = E; }
+additive_expression(A) ::= additive_expression(L) PLUS multiplicative_expression(R). {
+    A = make_node(CTX, C11_AST_BINARY_EXPR);
+    C11_BinaryExpr *e = (C11_BinaryExpr*)A;
+    e->op = C11_OP_ADD;
+    e->left = L;
+    e->right = R;
+}
+additive_expression(A) ::= additive_expression(L) MINUS multiplicative_expression(R). {
+    A = make_node(CTX, C11_AST_BINARY_EXPR);
+    C11_BinaryExpr *e = (C11_BinaryExpr*)A;
+    e->op = C11_OP_SUB;
+    e->left = L;
+    e->right = R;
+}
+
+multiplicative_expression(A) ::= unary_expression(E). { A = E; }
+multiplicative_expression(A) ::= multiplicative_expression(L) STAR unary_expression(R). {
+    A = make_node(CTX, C11_AST_BINARY_EXPR);
+    C11_BinaryExpr *e = (C11_BinaryExpr*)A;
+    e->op = C11_OP_MUL;
+    e->left = L;
+    e->right = R;
+}
+multiplicative_expression(A) ::= multiplicative_expression(L) SLASH unary_expression(R). {
+    A = make_node(CTX, C11_AST_BINARY_EXPR);
+    C11_BinaryExpr *e = (C11_BinaryExpr*)A;
+    e->op = C11_OP_DIV;
+    e->left = L;
+    e->right = R;
+}
+
+unary_expression(A) ::= postfix_expression(E). { A = E; }
+unary_expression(A) ::= PLUSPLUS unary_expression(E). {
+    A = make_node(CTX, C11_AST_UNARY_EXPR);
+    C11_UnaryExpr *u = (C11_UnaryExpr*)A;
+    u->op = C11_OP_INC;
+    u->operand = E;
+    u->is_prefix = 1;
+}
+unary_expression(A) ::= MINUSMINUS unary_expression(E). {
+    A = make_node(CTX, C11_AST_UNARY_EXPR);
+    C11_UnaryExpr *u = (C11_UnaryExpr*)A;
+    u->op = C11_OP_DEC;
+    u->operand = E;
+    u->is_prefix = 1;
+}
+unary_expression(A) ::= MINUS unary_expression(E). {
+    A = make_node(CTX, C11_AST_UNARY_EXPR);
+    C11_UnaryExpr *u = (C11_UnaryExpr*)A;
+    u->op = C11_OP_NEG;
+    u->operand = E;
+}
+unary_expression(A) ::= BANG unary_expression(E). {
+    A = make_node(CTX, C11_AST_UNARY_EXPR);
+    C11_UnaryExpr *u = (C11_UnaryExpr*)A;
+    u->op = C11_OP_NOT;
+    u->operand = E;
+}
+unary_expression(A) ::= STAR unary_expression(E). {
+    A = make_node(CTX, C11_AST_UNARY_EXPR);
+    C11_UnaryExpr *u = (C11_UnaryExpr*)A;
+    u->op = C11_OP_DEREF;
+    u->operand = E;
+}
+unary_expression(A) ::= AMP unary_expression(E). {
+    A = make_node(CTX, C11_AST_UNARY_EXPR);
+    C11_UnaryExpr *u = (C11_UnaryExpr*)A;
+    u->op = C11_OP_ADDR;
+    u->operand = E;
+}
+unary_expression(A) ::= SIZEOF unary_expression(E). {
+    A = make_node(CTX, C11_AST_UNARY_EXPR);
+    C11_UnaryExpr *u = (C11_UnaryExpr*)A;
+    u->op = C11_OP_SIZEOF;
+    u->operand = E;
+}
+
+postfix_expression(A) ::= primary_expression(E). { A = E; }
+postfix_expression(A) ::= postfix_expression(E) LBRACKET expression(I) RBRACKET. {
+    /* Array subscript - simplified */
+    A = E;
+}
+postfix_expression(A) ::= postfix_expression(F) LPAREN RPAREN. {
+    A = make_node(CTX, C11_AST_CALL_EXPR);
+    ((C11_CallExpr*)A)->func = F;
+}
+postfix_expression(A) ::= postfix_expression(F) LPAREN argument_list(L) RPAREN. {
+    A = make_node(CTX, C11_AST_CALL_EXPR);
+    C11_CallExpr *c = (C11_CallExpr*)A;
+    c->func = F;
+    /* Attach arguments */
+}
+postfix_expression(A) ::= postfix_expression(E) DOT IDENT. {
+    /* Member access - simplified */
+    A = E;
+}
+postfix_expression(A) ::= postfix_expression(E) ARROW IDENT. {
+    /* Pointer member access - simplified */
+    A = E;
+}
+postfix_expression(A) ::= postfix_expression(E) PLUSPLUS. {
+    A = make_node(CTX, C11_AST_UNARY_EXPR);
+    C11_UnaryExpr *u = (C11_UnaryExpr*)A;
+    u->op = C11_OP_INC;
+    u->operand = E;
+    u->is_prefix = 0;
+}
+postfix_expression(A) ::= postfix_expression(E) MINUSMINUS. {
+    A = make_node(CTX, C11_AST_UNARY_EXPR);
+    C11_UnaryExpr *u = (C11_UnaryExpr*)A;
+    u->op = C11_OP_DEC;
+    u->operand = E;
+    u->is_prefix = 0;
+}
+
+argument_list(A) ::= assignment_expression(E). { A = E; }
+argument_list(A) ::= argument_list(L) COMMA assignment_expression(E). {
+    C11_ASTNode *last = L;
+    while (last->next) last = last->next;
+    last->next = E;
+    A = L;
+}
+
+primary_expression(A) ::= IDENT(I). {
+    A = make_node(CTX, C11_AST_IDENT);
+    strncpy(((C11_Ident*)A)->name, I.text, sizeof(((C11_Ident*)A)->name)-1);
+}
+primary_expression(A) ::= INT_LIT(I). {
+    A = make_node(CTX, C11_AST_LITERAL_INT);
+    ((C11_LiteralInt*)A)->value = I.int_value;
+}
+primary_expression(A) ::= FLOAT_LIT(F). {
+    A = make_node(CTX, C11_AST_LITERAL_FLOAT);
+    ((C11_LiteralFloat*)A)->value = F.float_value;
+}
+primary_expression(A) ::= STRING_LIT(S). {
+    A = make_node(CTX, C11_AST_LITERAL_STRING);
+    strncpy(((C11_LiteralString*)A)->value, S.text, sizeof(((C11_LiteralString*)A)->value)-1);
+}
+primary_expression(A) ::= CHAR_LIT(C). {
+    A = make_node(CTX, C11_AST_LITERAL_CHAR);
+    ((C11_LiteralChar*)A)->value = C.char_value;
+}
+primary_expression(A) ::= LPAREN expression(E) RPAREN. { A = E; }

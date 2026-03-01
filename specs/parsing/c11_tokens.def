@@ -1,0 +1,182 @@
+/* c11_tokens.def - C11 Token Definitions (X-Macro Format)
+ * ═══════════════════════════════════════════════════════════════════════════
+ *
+ * Token definitions for C11 lexer using X-macro pattern.
+ * Input to defgen: generates c11_tokens.h
+ *
+ * Usage: ./build/defgen specs/parsing/c11_tokens.def gen/parsing c11
+ *
+ * X-Macro Format: TOK(name, lexeme, kind, doc)
+ *   name   - Token enum name (C11_TOK_xxx)
+ *   lexeme - String representation (for keywords) or pattern description
+ *   kind   - Token category for parser
+ *   doc    - Documentation string
+ *
+ * ═══════════════════════════════════════════════════════════════════════════
+ */
+
+/* ─── Keywords ────────────────────────────────────────────────────────────── */
+
+#define C11_KEYWORDS(TOK) \
+    TOK(AUTO,       "auto",       KEYWORD, "auto storage class") \
+    TOK(BREAK,      "break",      KEYWORD, "break statement") \
+    TOK(CASE,       "case",       KEYWORD, "case label") \
+    TOK(CHAR,       "char",       TYPE,    "char type") \
+    TOK(CONST,      "const",      QUAL,    "const qualifier") \
+    TOK(CONTINUE,   "continue",   KEYWORD, "continue statement") \
+    TOK(DEFAULT,    "default",    KEYWORD, "default label") \
+    TOK(DO,         "do",         KEYWORD, "do-while loop") \
+    TOK(DOUBLE,     "double",     TYPE,    "double type") \
+    TOK(ELSE,       "else",       KEYWORD, "else branch") \
+    TOK(ENUM,       "enum",       TYPE,    "enum type") \
+    TOK(EXTERN,     "extern",     STORAGE, "extern storage class") \
+    TOK(FLOAT,      "float",      TYPE,    "float type") \
+    TOK(FOR,        "for",        KEYWORD, "for loop") \
+    TOK(GOTO,       "goto",       KEYWORD, "goto statement") \
+    TOK(IF,         "if",         KEYWORD, "if statement") \
+    TOK(INLINE,     "inline",     QUAL,    "inline function specifier") \
+    TOK(INT,        "int",        TYPE,    "int type") \
+    TOK(LONG,       "long",       TYPE,    "long type") \
+    TOK(REGISTER,   "register",   STORAGE, "register storage class") \
+    TOK(RESTRICT,   "restrict",   QUAL,    "restrict qualifier") \
+    TOK(RETURN,     "return",     KEYWORD, "return statement") \
+    TOK(SHORT,      "short",      TYPE,    "short type") \
+    TOK(SIGNED,     "signed",     TYPE,    "signed type") \
+    TOK(SIZEOF,     "sizeof",     KEYWORD, "sizeof operator") \
+    TOK(STATIC,     "static",     STORAGE, "static storage class") \
+    TOK(STRUCT,     "struct",     TYPE,    "struct type") \
+    TOK(SWITCH,     "switch",     KEYWORD, "switch statement") \
+    TOK(TYPEDEF,    "typedef",    STORAGE, "typedef") \
+    TOK(UNION,      "union",      TYPE,    "union type") \
+    TOK(UNSIGNED,   "unsigned",   TYPE,    "unsigned type") \
+    TOK(VOID,       "void",       TYPE,    "void type") \
+    TOK(VOLATILE,   "volatile",   QUAL,    "volatile qualifier") \
+    TOK(WHILE,      "while",      KEYWORD, "while loop") \
+    TOK(_BOOL,      "_Bool",      TYPE,    "C99 bool") \
+    TOK(_COMPLEX,   "_Complex",   TYPE,    "C99 complex") \
+    TOK(_IMAGINARY, "_Imaginary", TYPE,    "C99 imaginary")
+
+/* ─── Operators ───────────────────────────────────────────────────────────── */
+
+#define C11_OPERATORS(TOK) \
+    TOK(PLUS,       "+",    OP,     "addition") \
+    TOK(MINUS,      "-",    OP,     "subtraction") \
+    TOK(STAR,       "*",    OP,     "multiplication/pointer") \
+    TOK(SLASH,      "/",    OP,     "division") \
+    TOK(PERCENT,    "%",    OP,     "modulo") \
+    TOK(AMP,        "&",    OP,     "bitwise AND/address-of") \
+    TOK(PIPE,       "|",    OP,     "bitwise OR") \
+    TOK(CARET,      "^",    OP,     "bitwise XOR") \
+    TOK(TILDE,      "~",    OP,     "bitwise NOT") \
+    TOK(BANG,       "!",    OP,     "logical NOT") \
+    TOK(LT,         "<",    OP,     "less than") \
+    TOK(GT,         ">",    OP,     "greater than") \
+    TOK(EQ,         "=",    OP,     "assignment") \
+    TOK(QUESTION,   "?",    OP,     "ternary") \
+    TOK(COLON,      ":",    PUNCT,  "colon") \
+    TOK(COMMA,      ",",    PUNCT,  "comma") \
+    TOK(SEMI,       ";",    PUNCT,  "semicolon") \
+    TOK(DOT,        ".",    OP,     "member access") \
+    TOK(ARROW,      "->",   OP,     "pointer member access") \
+    TOK(PLUSPLUS,   "++",   OP,     "increment") \
+    TOK(MINUSMINUS, "--",   OP,     "decrement") \
+    TOK(LTLT,       "<<",   OP,     "left shift") \
+    TOK(GTGT,       ">>",   OP,     "right shift") \
+    TOK(LTEQ,       "<=",   OP,     "less or equal") \
+    TOK(GTEQ,       ">=",   OP,     "greater or equal") \
+    TOK(EQEQ,       "==",   OP,     "equality") \
+    TOK(BANGEQ,     "!=",   OP,     "inequality") \
+    TOK(AMPAMP,     "&&",   OP,     "logical AND") \
+    TOK(PIPEPIPE,   "||",   OP,     "logical OR") \
+    TOK(PLUSEQ,     "+=",   OP,     "add-assign") \
+    TOK(MINUSEQ,    "-=",   OP,     "sub-assign") \
+    TOK(STAREQ,     "*=",   OP,     "mul-assign") \
+    TOK(SLASHEQ,    "/=",   OP,     "div-assign") \
+    TOK(PERCENTEQ,  "%=",   OP,     "mod-assign") \
+    TOK(AMPEQ,      "&=",   OP,     "and-assign") \
+    TOK(PIPEEQ,     "|=",   OP,     "or-assign") \
+    TOK(CARETEQ,    "^=",   OP,     "xor-assign") \
+    TOK(LTLTEQ,     "<<=",  OP,     "shl-assign") \
+    TOK(GTGTEQ,     ">>=",  OP,     "shr-assign")
+
+/* ─── Punctuation ─────────────────────────────────────────────────────────── */
+
+#define C11_PUNCTUATION(TOK) \
+    TOK(LPAREN,     "(",    PUNCT,  "left paren") \
+    TOK(RPAREN,     ")",    PUNCT,  "right paren") \
+    TOK(LBRACE,     "{",    PUNCT,  "left brace") \
+    TOK(RBRACE,     "}",    PUNCT,  "right brace") \
+    TOK(LBRACKET,   "[",    PUNCT,  "left bracket") \
+    TOK(RBRACKET,   "]",    PUNCT,  "right bracket") \
+    TOK(ELLIPSIS,   "...",  PUNCT,  "ellipsis")
+
+/* ─── Literals ────────────────────────────────────────────────────────────── */
+
+#define C11_LITERALS(TOK) \
+    TOK(IDENT,      "<identifier>",  IDENT,   "identifier") \
+    TOK(INT_LIT,    "<integer>",     LITERAL, "integer literal") \
+    TOK(FLOAT_LIT,  "<float>",       LITERAL, "float literal") \
+    TOK(CHAR_LIT,   "<char>",        LITERAL, "character literal") \
+    TOK(STRING_LIT, "<string>",      LITERAL, "string literal")
+
+/* ─── Special ─────────────────────────────────────────────────────────────── */
+
+#define C11_SPECIAL(TOK) \
+    TOK(EOF_TOK,    "<eof>",         SPECIAL, "end of file") \
+    TOK(ERROR,      "<error>",       SPECIAL, "lexer error") \
+    TOK(NEWLINE,    "<newline>",     SPECIAL, "newline (for preprocessor)")
+
+/* ─── Combined Token Table ────────────────────────────────────────────────── */
+
+#define C11_TOKENS(TOK) \
+    C11_KEYWORDS(TOK) \
+    C11_OPERATORS(TOK) \
+    C11_PUNCTUATION(TOK) \
+    C11_LITERALS(TOK) \
+    C11_SPECIAL(TOK)
+
+/* ─── Token Kind Categories ───────────────────────────────────────────────── */
+
+#define C11_TOKEN_KINDS(KIND) \
+    KIND(KEYWORD,  1, "keyword") \
+    KIND(TYPE,     2, "type specifier") \
+    KIND(QUAL,     3, "type qualifier") \
+    KIND(STORAGE,  4, "storage class") \
+    KIND(OP,       5, "operator") \
+    KIND(PUNCT,    6, "punctuation") \
+    KIND(IDENT,    7, "identifier") \
+    KIND(LITERAL,  8, "literal") \
+    KIND(SPECIAL,  9, "special")
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Usage in Generated Header:
+ *
+ * // Expand to enum
+ * typedef enum {
+ *     #define TOK(name, lex, kind, doc) C11_TOK_##name,
+ *     C11_TOKENS(TOK)
+ *     #undef TOK
+ *     C11_TOK_COUNT
+ * } C11TokenType;
+ *
+ * // Expand to string table
+ * static const char* c11_token_str(C11TokenType t) {
+ *     switch(t) {
+ *         #define TOK(name, lex, kind, doc) case C11_TOK_##name: return lex;
+ *         C11_TOKENS(TOK)
+ *         #undef TOK
+ *     }
+ *     return "<unknown>";
+ * }
+ *
+ * // Expand to documentation
+ * static const char* c11_token_doc(C11TokenType t) {
+ *     switch(t) {
+ *         #define TOK(name, lex, kind, doc) case C11_TOK_##name: return doc;
+ *         C11_TOKENS(TOK)
+ *         #undef TOK
+ *     }
+ *     return "";
+ * }
+ * ═══════════════════════════════════════════════════════════════════════════
+ */

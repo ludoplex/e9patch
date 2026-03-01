@@ -1,0 +1,311 @@
+# C11 AST Node Types
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# Abstract Syntax Tree node definitions for C11 subset parsing.
+# Used by IR-based live reload for AST-level diffing.
+#
+# Input to schemagen: generates c11_ast_types.c,h
+#
+# Usage: ./build/schemagen specs/domain/c11_ast.schema gen/domain c11_ast
+#
+# ═══════════════════════════════════════════════════════════════════════════
+
+@name C11AST
+@prefix c11
+
+# ─── Base Node ──────────────────────────────────────────────────────────────
+
+entity ASTNode {
+    doc "Base for all AST nodes"
+
+    field kind       : enum ASTKind      "Node type discriminator"
+    field loc_file   : string[256]       "Source file path"
+    field loc_line   : u32               "Line number (1-based)"
+    field loc_col    : u32               "Column number (1-based)"
+    field parent     : ptr ASTNode       "Parent node (NULL for root)"
+    field next       : ptr ASTNode       "Next sibling"
+    field child      : ptr ASTNode       "First child"
+}
+
+enum ASTKind {
+    AST_TRANSLATION_UNIT    "Root: entire file"
+    AST_FUNCTION_DEF        "Function definition"
+    AST_FUNCTION_DECL       "Function declaration (prototype)"
+    AST_PARAM_LIST          "Parameter list"
+    AST_PARAM               "Single parameter"
+    AST_COMPOUND_STMT       "Block { ... }"
+    AST_RETURN_STMT         "return expr;"
+    AST_IF_STMT             "if/else"
+    AST_WHILE_STMT          "while loop"
+    AST_FOR_STMT            "for loop"
+    AST_EXPR_STMT           "Expression statement"
+    AST_VAR_DECL            "Variable declaration"
+    AST_BINARY_EXPR         "Binary operator"
+    AST_UNARY_EXPR          "Unary operator"
+    AST_CALL_EXPR           "Function call"
+    AST_IDENT               "Identifier"
+    AST_LITERAL_INT         "Integer literal"
+    AST_LITERAL_FLOAT       "Float literal"
+    AST_LITERAL_STRING      "String literal"
+    AST_LITERAL_CHAR        "Character literal"
+    AST_TYPE_SPEC           "Type specifier"
+}
+
+# ─── Function Definition ────────────────────────────────────────────────────
+
+entity FunctionDef {
+    doc "Function definition node"
+    extends ASTNode
+
+    field name         : string[128]     "Function name"
+    field return_type  : ptr TypeSpec    "Return type"
+    field params       : ptr ParamList   "Parameters"
+    field body         : ptr CompoundStmt "Function body"
+    field is_static    : bool            "static keyword"
+    field is_inline    : bool            "inline keyword"
+
+    # For diffing
+    field hash         : u64             "Content hash for quick compare"
+    field byte_start   : u64             "Start offset in source"
+    field byte_end     : u64             "End offset in source"
+}
+
+entity ParamList {
+    doc "Parameter list"
+    extends ASTNode
+
+    field count        : u32             "Number of parameters"
+    field params       : array Param     "Parameter nodes"
+    field is_variadic  : bool            "Has ... at end"
+}
+
+entity Param {
+    doc "Single parameter"
+    extends ASTNode
+
+    field name         : string[64]      "Parameter name"
+    field type         : ptr TypeSpec    "Parameter type"
+}
+
+# ─── Type Specifiers ────────────────────────────────────────────────────────
+
+entity TypeSpec {
+    doc "Type specifier"
+    extends ASTNode
+
+    field base_type    : enum BaseType   "Base type"
+    field is_const     : bool            "const qualifier"
+    field is_volatile  : bool            "volatile qualifier"
+    field is_pointer   : bool            "Pointer type"
+    field pointer_depth: u32             "Number of * levels"
+    field array_size   : i64             "Array size (-1 = unsized)"
+    field typedef_name : string[64]      "For typedef'd types"
+}
+
+enum BaseType {
+    TYPE_VOID
+    TYPE_CHAR
+    TYPE_SHORT
+    TYPE_INT
+    TYPE_LONG
+    TYPE_LONGLONG
+    TYPE_FLOAT
+    TYPE_DOUBLE
+    TYPE_SIGNED
+    TYPE_UNSIGNED
+    TYPE_STRUCT
+    TYPE_UNION
+    TYPE_ENUM
+    TYPE_TYPEDEF
+}
+
+# ─── Statements ─────────────────────────────────────────────────────────────
+
+entity CompoundStmt {
+    doc "Block statement { ... }"
+    extends ASTNode
+
+    field stmts        : array ptr ASTNode "Statement list"
+    field stmt_count   : u32               "Number of statements"
+}
+
+entity ReturnStmt {
+    doc "Return statement"
+    extends ASTNode
+
+    field expr         : ptr ASTNode       "Return expression (may be NULL)"
+}
+
+entity IfStmt {
+    doc "If statement"
+    extends ASTNode
+
+    field condition    : ptr ASTNode       "Condition expression"
+    field then_branch  : ptr ASTNode       "Then branch"
+    field else_branch  : ptr ASTNode       "Else branch (may be NULL)"
+}
+
+entity WhileStmt {
+    doc "While loop"
+    extends ASTNode
+
+    field condition    : ptr ASTNode       "Loop condition"
+    field body         : ptr ASTNode       "Loop body"
+}
+
+entity ForStmt {
+    doc "For loop"
+    extends ASTNode
+
+    field init         : ptr ASTNode       "Initializer"
+    field condition    : ptr ASTNode       "Condition"
+    field increment    : ptr ASTNode       "Increment"
+    field body         : ptr ASTNode       "Loop body"
+}
+
+entity ExprStmt {
+    doc "Expression statement"
+    extends ASTNode
+
+    field expr         : ptr ASTNode       "Expression"
+}
+
+entity VarDecl {
+    doc "Variable declaration"
+    extends ASTNode
+
+    field name         : string[64]        "Variable name"
+    field type         : ptr TypeSpec      "Variable type"
+    field init         : ptr ASTNode       "Initializer (may be NULL)"
+}
+
+# ─── Expressions ────────────────────────────────────────────────────────────
+
+entity BinaryExpr {
+    doc "Binary expression"
+    extends ASTNode
+
+    field op           : enum BinaryOp     "Operator"
+    field left         : ptr ASTNode       "Left operand"
+    field right        : ptr ASTNode       "Right operand"
+}
+
+enum BinaryOp {
+    OP_ADD              "+"
+    OP_SUB              "-"
+    OP_MUL              "*"
+    OP_DIV              "/"
+    OP_MOD              "%"
+    OP_EQ               "=="
+    OP_NE               "!="
+    OP_LT               "<"
+    OP_LE               "<="
+    OP_GT               ">"
+    OP_GE               ">="
+    OP_AND              "&&"
+    OP_OR               "||"
+    OP_BAND             "&"
+    OP_BOR              "|"
+    OP_BXOR             "^"
+    OP_SHL              "<<"
+    OP_SHR              ">>"
+    OP_ASSIGN           "="
+    OP_COMMA            ","
+}
+
+entity UnaryExpr {
+    doc "Unary expression"
+    extends ASTNode
+
+    field op           : enum UnaryOp      "Operator"
+    field operand      : ptr ASTNode       "Operand"
+    field is_prefix    : bool              "Prefix vs postfix"
+}
+
+enum UnaryOp {
+    OP_NEG              "-"
+    OP_NOT              "!"
+    OP_BNOT             "~"
+    OP_ADDR             "&"
+    OP_DEREF            "*"
+    OP_INC              "++"
+    OP_DEC              "--"
+    OP_SIZEOF           "sizeof"
+}
+
+entity CallExpr {
+    doc "Function call"
+    extends ASTNode
+
+    field func         : ptr ASTNode       "Function (usually Ident)"
+    field args         : array ptr ASTNode "Arguments"
+    field arg_count    : u32               "Number of arguments"
+}
+
+entity Ident {
+    doc "Identifier"
+    extends ASTNode
+
+    field name         : string[64]        "Identifier name"
+}
+
+entity LiteralInt {
+    doc "Integer literal"
+    extends ASTNode
+
+    field value        : i64               "Integer value"
+    field is_unsigned  : bool              "Unsigned suffix"
+    field is_long      : bool              "Long suffix"
+}
+
+entity LiteralFloat {
+    doc "Floating-point literal"
+    extends ASTNode
+
+    field value        : f64               "Float value"
+    field is_float     : bool              "float vs double"
+}
+
+entity LiteralString {
+    doc "String literal"
+    extends ASTNode
+
+    field value        : string[1024]      "String content"
+    field length       : u32               "String length"
+}
+
+entity LiteralChar {
+    doc "Character literal"
+    extends ASTNode
+
+    field value        : char              "Character value"
+}
+
+# ─── IR Diff Structures ─────────────────────────────────────────────────────
+
+entity ASTDiff {
+    doc "Result of comparing two ASTs"
+
+    field old_root     : ptr ASTNode       "Old AST root"
+    field new_root     : ptr ASTNode       "New AST root"
+    field changes      : array FuncChange  "Changed functions"
+    field change_count : u32               "Number of changes"
+}
+
+entity FuncChange {
+    doc "A changed function"
+
+    field name         : string[128]       "Function name"
+    field change_type  : enum ChangeType   "Type of change"
+    field old_func     : ptr FunctionDef   "Old definition (NULL if added)"
+    field new_func     : ptr FunctionDef   "New definition (NULL if removed)"
+    field old_hash     : u64               "Old content hash"
+    field new_hash     : u64               "New content hash"
+}
+
+enum ChangeType {
+    CHANGE_ADDED       "Function added"
+    CHANGE_REMOVED     "Function removed"
+    CHANGE_MODIFIED    "Function body changed"
+    CHANGE_SIGNATURE   "Function signature changed"
+}
