@@ -30,7 +30,7 @@
 ## Overview
 
 Binary patching tool for APE (Actually Portable Executable) polyglot binaries.
-Part of cosmicringforge, demonstrating spec-driven C code generation.
+Part of cosmo-bde, demonstrating spec-driven C code generation.
 
 ## Critical Constraints
 
@@ -159,5 +159,5 @@ Patch States:
 - [VENDORS.md](../../../VENDORS.md) - **Vendor repos (READ FIRST)**
 - [CONVENTIONS.md](CONVENTIONS.md) - Full style guide
 - [specs/E9APE_DOGFOODING.md](specs/E9APE_DOGFOODING.md) - Dogfooding details
-- [../docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) - CosmicRingForge architecture
+- [../docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) - cosmo-bde architecture
 - [../docs/APE_LIVERELOAD.md](../docs/APE_LIVERELOAD.md) - APE live reload reference

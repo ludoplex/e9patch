@@ -28,7 +28,7 @@ class E9Range {  // FORBIDDEN
 };
 ```
 
-**Why**: cosmicringforge generates C. Using C++ would break dogfooding.
+**Why**: cosmo-bde generates C. Using C++ would break dogfooding.
 
 ---
 

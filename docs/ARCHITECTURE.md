@@ -2,7 +2,7 @@
 
 > **LLM Reference Document** - Binary patching architecture for APE polyglots.
 >
-> Part of CosmicRingForge. See also: `../docs/ARCHITECTURE.md`
+> Part of cosmo-bde. See also: `../docs/ARCHITECTURE.md`
 
 ---
 
@@ -419,12 +419,12 @@ upstream/e9studio/
 
 ---
 
-## 7. Integration with CosmicRingForge
+## 7. Integration with cosmo-bde
 
-e9studio is integrated as a submodule in CosmicRingForge and follows the same patterns:
+e9studio is integrated as a submodule in cosmo-bde and follows the same patterns:
 
 ```
-cosmicringforge (mbse-stacks)
+cosmo-bde (mbse-stacks)
 +-- upstream/
 |   +-- e9studio/              <- This repository as submodule
 |
@@ -445,7 +445,7 @@ cosmicringforge (mbse-stacks)
 ### Build Integration
 
 ```bash
-# From cosmicringforge root:
+# From cosmo-bde root:
 make tools          # Build schemagen, etc.
 make regen          # Regenerate including e9studio types
 make e9studio       # Build livereload tool
@@ -548,4 +548,4 @@ kill $APP_PID
 
 ---
 
-*Generated for LLM reference. Part of CosmicRingForge.*
+*Generated for LLM reference. Part of cosmo-bde.*

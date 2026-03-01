@@ -2,7 +2,7 @@
 
 ## Cosmic Convention Compliance
 
-This document ensures e9studio APE support follows **cosmicringforge dogfooding principles** and **Cosmopolitan cosmic conventions**.
+This document ensures e9studio APE support follows **cosmo-bde dogfooding principles** and **Cosmopolitan cosmic conventions**.
 
 ### Core Principles
 

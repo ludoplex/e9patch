@@ -2,7 +2,7 @@
 
 > **LLM Reference Document** - Full Ring composability for IR-based live reload.
 >
-> Dogfooded using CosmicRingForge generators. C version abstracted (base: C11/Cosmopolitan).
+> Dogfooded using cosmo-bde generators. C version abstracted (base: C11/Cosmopolitan).
 
 ---
 
@@ -23,7 +23,7 @@ CURRENT:
 
 ## 2. Solution: Ring 0 AST-Based IR
 
-Use CosmicRingForge generators to build a C parser for AST-level diffing:
+Use cosmo-bde generators to build a C parser for AST-level diffing:
 
 ```
 IR-BASED (Ring 0 Dogfooded):
@@ -552,7 +552,7 @@ int c11_parser_init(C11ParseContext *ctx, int c_standard) {
 - **Pure C** - no C++ dependencies (Binaryen, libclang not needed)
 - **Cosmopolitan compatible** - builds with cosmocc to APE
 - **C version abstracted** - supports C89 through C23
-- **Fully dogfooded** - uses CosmicRingForge generators
+- **Fully dogfooded** - uses cosmo-bde generators
 - **Drift-gated** - CI verifies generated code matches specs
 
 **Tool Status:**
@@ -563,4 +563,4 @@ int c11_parser_init(C11ParseContext *ctx, int c_standard) {
 
 ---
 
-*Generated for LLM reference. Part of CosmicRingForge/e9studio.*
+*Generated for LLM reference. Part of cosmo-bde/e9studio.*

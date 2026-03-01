@@ -21,7 +21,7 @@
  *   - file_offset often equals RVA
  *   - No ELF program headers to parse
  *
- * Pure C implementation for cosmicringforge dogfooding.
+ * Pure C implementation for cosmo-bde dogfooding.
  *
  * Copyright (C) 2024 E9Patch Contributors
  * License: GPLv3+

@@ -31,7 +31,7 @@ INCLUDES = -I$(E9PATCH_DIR) -I$(WASM_DIR) -I$(GEN_DIR) -I$(WAMR_INCLUDE) -I$(WAM
 # WAMR source files
 WAMR_SRCS = $(WAMR_COMMON)/wasm_runtime_common.c $(WAMR_PLATFORM)/platform_init.c
 
-# Generated types (from cosmicringforge root)
+# Generated types (from cosmo-bde root)
 # Path: upstream/e9studio/test/livereload -> ../../../../gen/domain
 GEN_DIR = ../../../../gen/domain
 GEN_TYPES = $(GEN_DIR)/livereload_types.c
@@ -40,7 +40,7 @@ GEN_TYPES = $(GEN_DIR)/livereload_types.c
 
 all: native
 
-# Standalone livereload (unified procmem API, uses cosmicringforge generated types)
+# Standalone livereload (unified procmem API, uses cosmo-bde generated types)
 # No sudo needed if you own the target process!
 E9PROCMEM_SRC = $(E9PATCH_DIR)/e9procmem.c
 

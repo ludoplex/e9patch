@@ -21,7 +21,7 @@
  *   - Uses WAMR host (via e9wasm_host.h) for icache flush
  *   - No ELF assumptions for x86-64 (APE has no x86-64 ELF!)
  *
- * Pure C implementation for cosmicringforge dogfooding.
+ * Pure C implementation for cosmo-bde dogfooding.
  *
  * Copyright (C) 2024 E9Patch Contributors
  * License: GPLv3+

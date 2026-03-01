@@ -44,7 +44,7 @@
 #endif
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Generated Types (from cosmicringforge)
+ * Generated Types (from cosmo-bde)
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 #include "livereload_types.h"
