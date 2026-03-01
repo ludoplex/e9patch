@@ -1,0 +1,158 @@
+# Patch Lifecycle State Machine
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# State machine for individual patch lifecycle.
+# Input to smgen: generates patch_sm.c,h
+#
+# Usage: ./build/smgen specs/behavior/patch.sm gen/behavior patch
+#
+# ═══════════════════════════════════════════════════════════════════════════
+
+@name Patch
+@prefix patch
+@initial PENDING
+
+# ─── States ─────────────────────────────────────────────────────────────────
+
+state PENDING {
+    doc "Patch generated, awaiting application"
+    entry record_timestamp
+    on APPLY -> APPLYING : begin_apply
+    on DISCARD -> DISCARDED : cleanup
+}
+
+state APPLYING {
+    doc "Patch being written to memory"
+    entry save_old_bytes
+    on WRITE_OK -> VERIFYING : verify_write
+    on WRITE_FAIL -> FAILED : record_error
+}
+
+state VERIFYING {
+    doc "Verifying patch was written correctly"
+    entry read_back_bytes
+    on VERIFY_OK -> APPLIED : flush_icache
+    on VERIFY_FAIL -> FAILED : record_error, restore_old_bytes
+}
+
+state APPLIED {
+    doc "Patch successfully applied"
+    entry update_stats
+    on REVERT -> REVERTING : begin_revert
+}
+
+state REVERTING {
+    doc "Restoring original bytes"
+    entry write_old_bytes
+    on REVERT_OK -> REVERTED : flush_icache
+    on REVERT_FAIL -> APPLIED : record_error  # Stay applied if revert fails
+}
+
+state REVERTED {
+    doc "Patch reverted to original"
+    entry update_stats
+    on REAPPLY -> APPLYING : begin_apply
+}
+
+state FAILED {
+    doc "Patch application failed"
+    entry log_failure
+    on RETRY -> APPLYING : begin_apply
+    on DISCARD -> DISCARDED : cleanup
+}
+
+state DISCARDED {
+    doc "Patch discarded, resources freed"
+    entry free_bytes
+}
+
+# ─── Events ─────────────────────────────────────────────────────────────────
+
+event APPLY       "Apply patch to target"
+event WRITE_OK    "Memory write succeeded"
+event WRITE_FAIL  "Memory write failed"
+event VERIFY_OK   "Read-back matches written bytes"
+event VERIFY_FAIL "Read-back mismatch"
+event REVERT      "Restore original bytes"
+event REVERT_OK   "Revert succeeded"
+event REVERT_FAIL "Revert failed"
+event REAPPLY     "Re-apply a reverted patch"
+event RETRY       "Retry failed patch"
+event DISCARD     "Discard patch"
+
+# ─── Actions ────────────────────────────────────────────────────────────────
+
+action record_timestamp {
+    doc "Record when patch was created"
+    code {
+        patch->timestamp = time(NULL);
+    }
+}
+
+action begin_apply {
+    doc "Start patch application"
+}
+
+action save_old_bytes {
+    doc "Save original bytes before overwriting"
+    code {
+        memcpy(patch->old_bytes, target + offset, patch->size);
+    }
+}
+
+action verify_write {
+    doc "Read back and compare written bytes"
+}
+
+action read_back_bytes {
+    doc "Read bytes from target for verification"
+}
+
+action flush_icache {
+    doc "Flush instruction cache for patched region"
+    code {
+        __builtin___clear_cache(addr, addr + size);
+    }
+}
+
+action update_stats {
+    doc "Update global statistics"
+}
+
+action begin_revert {
+    doc "Start reverting patch"
+}
+
+action write_old_bytes {
+    doc "Write saved original bytes back"
+    code {
+        memcpy(target + offset, patch->old_bytes, patch->size);
+    }
+}
+
+action restore_old_bytes {
+    doc "Restore old bytes after verify failure"
+}
+
+action record_error {
+    doc "Record error message in patch"
+    code {
+        snprintf(patch->error_msg, sizeof(patch->error_msg), "%s", msg);
+    }
+}
+
+action log_failure {
+    doc "Log patch failure"
+}
+
+action cleanup {
+    doc "Release patch resources"
+}
+
+action free_bytes {
+    doc "Free allocated byte buffers"
+    code {
+        free(patch->old_bytes);
+        free(patch->new_bytes);
+    }
+}

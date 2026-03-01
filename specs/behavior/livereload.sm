@@ -1,0 +1,186 @@
+# LiveReload State Machine
+# ═══════════════════════════════════════════════════════════════════════════
+#
+# State machine for live reload session lifecycle.
+# Input to smgen: generates livereload_sm.c,h
+#
+# Usage: ./build/smgen specs/behavior/livereload.sm gen/behavior livereload
+#
+# ═══════════════════════════════════════════════════════════════════════════
+
+@name LiveReload
+@prefix lr
+@initial UNINIT
+
+# ─── States ─────────────────────────────────────────────────────────────────
+
+state UNINIT {
+    doc "Not initialized"
+    on INIT -> IDLE : do_init
+}
+
+state IDLE {
+    doc "Initialized but not watching"
+    entry clear_stats
+    on WATCH -> WATCHING : start_watch
+    on SHUTDOWN -> UNINIT : do_shutdown
+}
+
+state WATCHING {
+    doc "Monitoring source files for changes"
+    entry log_watching
+    on FILE_CHANGE -> COMPILING : start_compile
+    on UNWATCH -> IDLE : stop_watch
+    on SHUTDOWN -> UNINIT : do_shutdown
+}
+
+state COMPILING {
+    doc "Recompiling changed source file"
+    entry invoke_compiler
+    on COMPILE_OK -> DIFFING : start_diff
+    on COMPILE_FAIL -> WATCHING : log_compile_error
+    on SHUTDOWN -> UNINIT : do_shutdown
+}
+
+state DIFFING {
+    doc "Comparing old and new object files"
+    entry invoke_binaryen
+    on DIFF_FOUND -> PATCHING : start_patch
+    on NO_DIFF -> WATCHING : log_no_changes
+    on DIFF_FAIL -> WATCHING : log_diff_error
+    on SHUTDOWN -> UNINIT : do_shutdown
+}
+
+state PATCHING {
+    doc "Applying patches to target process"
+    entry apply_patches
+    on PATCH_OK -> WATCHING : log_patch_success, update_stats
+    on PATCH_FAIL -> WATCHING : log_patch_error
+    on SHUTDOWN -> UNINIT : do_shutdown
+}
+
+# ─── Events ─────────────────────────────────────────────────────────────────
+
+event INIT        "Initialize live reload"
+event SHUTDOWN    "Shutdown and cleanup"
+event WATCH       "Start watching files"
+event UNWATCH     "Stop watching files"
+event FILE_CHANGE "Source file modified"
+event COMPILE_OK  "Compilation succeeded"
+event COMPILE_FAIL "Compilation failed"
+event DIFF_FOUND  "Changes detected in object"
+event NO_DIFF     "No changes in object"
+event DIFF_FAIL   "Diff operation failed"
+event PATCH_OK    "Patch applied successfully"
+event PATCH_FAIL  "Patch application failed"
+
+# ─── Actions ────────────────────────────────────────────────────────────────
+
+action do_init {
+    doc "Initialize state, open target"
+    code {
+        // Parse APE, setup procmem, create cache dir
+    }
+}
+
+action do_shutdown {
+    doc "Cleanup resources"
+    code {
+        // Unmap target, close handles, free patches
+    }
+}
+
+action start_watch {
+    doc "Start file watcher"
+    code {
+        // inotify_add_watch or start polling
+    }
+}
+
+action stop_watch {
+    doc "Stop file watcher"
+    code {
+        // inotify_rm_watch or stop polling
+    }
+}
+
+action clear_stats {
+    doc "Reset statistics counters"
+}
+
+action log_watching {
+    doc "Log that we're now watching"
+}
+
+action start_compile {
+    doc "Invoke cosmocc on changed file"
+}
+
+action invoke_compiler {
+    doc "Run cosmocc -c"
+    code {
+        // popen("cosmocc -c -O2 -g ...")
+    }
+}
+
+action log_compile_error {
+    doc "Log compilation failure"
+}
+
+action start_diff {
+    doc "Begin object file comparison"
+}
+
+action invoke_binaryen {
+    doc "Run Binaryen diff on objects"
+    code {
+        // e9_binaryen_diff_objects(old, new, &patches, &count)
+    }
+}
+
+action log_no_changes {
+    doc "Log that no functional changes detected"
+}
+
+action log_diff_error {
+    doc "Log diff operation failure"
+}
+
+action start_patch {
+    doc "Begin applying patches"
+}
+
+action apply_patches {
+    doc "Write patches to target memory"
+    code {
+        // for each patch: process_vm_writev + icache flush
+    }
+}
+
+action log_patch_success {
+    doc "Log successful patch application"
+}
+
+action log_patch_error {
+    doc "Log patch failure"
+}
+
+action update_stats {
+    doc "Increment patch counters"
+}
+
+# ─── Guards (optional) ──────────────────────────────────────────────────────
+
+guard target_alive {
+    doc "Check if target process still exists"
+    code {
+        return kill(pid, 0) == 0;
+    }
+}
+
+guard has_pending_patches {
+    doc "Check if there are patches to apply"
+    code {
+        return g_state.num_patches > 0;
+    }
+}

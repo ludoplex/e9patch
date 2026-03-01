@@ -75,7 +75,28 @@ Key files:
 - `src/e9patch/wasm/e9binaryen.h` - Object diff via Binaryen
 - `specs/e9livereload.schema` - Protocol spec
 
+## Architecture Documentation
+
+- [docs/ARCHITECTURE.md](docs/ARCHITECTURE.md) - Component architecture and data flow
+- [doc/ape-anatomy-analysis.md](doc/ape-anatomy-analysis.md) - APE binary RE notes
+
+## State Machines
+
+- `specs/behavior/livereload.sm` - Live reload session lifecycle
+- `specs/behavior/patch.sm` - Individual patch lifecycle
+
+```
+LiveReload States:
+  UNINIT -> IDLE -> WATCHING -> COMPILING -> DIFFING -> PATCHING -> WATCHING
+
+Patch States:
+  PENDING -> APPLYING -> VERIFYING -> APPLIED <-> REVERTED
+                                  \-> FAILED
+```
+
 ## See Also
 
 - [CONVENTIONS.md](CONVENTIONS.md) - Full style guide
 - [specs/E9APE_DOGFOODING.md](specs/E9APE_DOGFOODING.md) - Dogfooding details
+- [../docs/ARCHITECTURE.md](../docs/ARCHITECTURE.md) - CosmicRingForge architecture
+- [../docs/APE_LIVERELOAD.md](../docs/APE_LIVERELOAD.md) - APE live reload reference
