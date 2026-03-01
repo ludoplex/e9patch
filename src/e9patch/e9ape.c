@@ -182,18 +182,7 @@ typedef struct {
     bool preserve_zipos;
 } APEInfo;
 
-/*
- * ZipOS entry
- */
-typedef struct {
-    char *name;
-    off_t local_header_offset;
-    size_t compressed_size;
-    size_t uncompressed_size;
-    uint16_t compression;
-    uint32_t crc32;
-    bool is_directory;
-} ZipOSEntry;
+/* ZipOS entry type is defined in e9ape.h as E9_ZipOSEntry */
 
 /* ═══════════════════════════════════════════════════════════════════════
  * Detection
@@ -275,7 +264,7 @@ int e9_ape_parse(const uint8_t *data, size_t size, E9_APEInfo *info)
     /* ── Parse shell bootstrap ───────────────────────────────────────── */
 
     /* Shell script starts after MZ fields, look for heredoc marker */
-    info->shell_start = 0x20;  /* Typical start after MZ reserved fields */
+    /* Note: shell_start is internal only, not exposed in public E9_APEInfo */
 
     /* Find heredoc marker (e.g., <<'justinezgyqwu') */
     for (size_t i = 0x20; i < 128 && i + 16 < size; i++)
@@ -573,7 +562,7 @@ int e9_ape_patch(uint8_t *data, size_t size, const E9_APEInfo *info,
  * ZipOS
  * ═══════════════════════════════════════════════════════════════════════ */
 
-ZipOSEntry *e9_ape_zipos_list(const uint8_t *data, size_t size,
+E9_ZipOSEntry *e9_ape_zipos_list(const uint8_t *data, size_t size,
                                const E9_APEInfo *info, size_t *out_count)
 {
     if (data == NULL || info == NULL || out_count == NULL)
@@ -611,7 +600,7 @@ ZipOSEntry *e9_ape_zipos_list(const uint8_t *data, size_t size,
     }
 
     /* Allocate and fill entries */
-    ZipOSEntry *entries = (ZipOSEntry *)calloc(count, sizeof(ZipOSEntry));
+    E9_ZipOSEntry *entries = (E9_ZipOSEntry *)calloc(count, sizeof(E9_ZipOSEntry));
     if (entries == NULL)
     {
         *out_count = 0;
@@ -647,7 +636,7 @@ ZipOSEntry *e9_ape_zipos_list(const uint8_t *data, size_t size,
     return entries;
 }
 
-void e9_ape_zipos_free_list(ZipOSEntry *entries, size_t count)
+void e9_ape_zipos_free_list(E9_ZipOSEntry *entries, size_t count)
 {
     if (entries == NULL)
         return;
@@ -665,7 +654,7 @@ bool e9_ape_zipos_exists(const uint8_t *data, size_t size,
         return false;
 
     size_t count;
-    ZipOSEntry *entries = e9_ape_zipos_list(data, size, info, &count);
+    E9_ZipOSEntry *entries = e9_ape_zipos_list(data, size, info, &count);
     if (entries == NULL)
         return false;
 
