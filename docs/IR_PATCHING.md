@@ -128,16 +128,31 @@ IR-BASED (Ring 0 Dogfooded):
                                    |
                                    | external tool outputs (committed)
                                    v
++=== RING 1: Binaryen (ludoplex fork) =====================================+
+|                                                                            |
+| COMPATIBLE TOOLING:                                                        |
+|   ludoplex/binaryen  <- WASM-based IR diffing (.com + .wasm outputs)      |
+|                         Cosmopolitan-compatible, embeddable in ZipOS       |
+|                                                                            |
++============================================================================+
+                                   |
+                                   v
 +=== RING 2: External Toolchains ==========================================+
 |                                                                            |
-| ALTERNATIVE FRONTENDS (outputs committed):                                 |
-|   TinyCC (libtcc)    <- Fast in-memory compilation (C, Ring 0 vendorable) |
-|   Binaryen           <- WASM-based IR diffing (C++, but WASM module Ring 0)|
-|   libclang           <- Full C11 parsing (C++, Ring 2)                     |
+| COMPILER NOTES:                                                            |
+|   cosmocc bundles GCC 14.1.0 (default) + Clang 19 (-mclang flag)          |
+|   Clang mode compiles C++ 3x faster                                        |
 |                                                                            |
-| VALIDATION TOOLS:                                                          |
+| ALTERNATIVE FRONTENDS (outputs committed, NOT required for build):         |
+|   libclang (library) <- Programmatic AST access (has relocation issues)   |
+|                         Note: libclang ≠ clang compiler                    |
+|                                                                            |
+| ⚠️ INCOMPATIBLE (do NOT use):                                              |
+|   TinyCC (libtcc)    <- "Invalid relocation entry" with cosmopolitan.a    |
+|                                                                            |
+| VALIDATION TOOLS (development only):                                       |
 |   gcc -fsyntax-only  <- Validate parser correctness                        |
-|   clang -ast-dump    <- Compare AST structure                              |
+|   clang -ast-dump    <- Compare AST structure (via cosmocc -mclang)        |
 |                                                                            |
 | RING 2 RULE: Outputs committed, builds succeed with Ring 0 only            |
 |                                                                            |
@@ -384,16 +399,20 @@ static inline const char* c11_token_doc(C11TokenType t) {
 
 ## 9. Latency Comparison
 
-| Approach | Ring | Compile | Diff | Total |
-|----------|------|---------|------|-------|
-| Current (cosmocc full) | 0 | 200-400ms | 10ms | **~200-500ms** |
-| Ring 0 AST (Lemon+lexgen) | **0** | 10-20ms | 10-20ms | **~30-50ms** |
-| TinyCC (libtcc) | 0* | 10-20ms | 10ms | **~30-50ms** |
-| Binaryen WASM IR | 1 | 50ms | 5ms | **~60-80ms** |
-| LLVM IR (clang) | 2 | 50ms | 10ms | **~70-100ms** |
-| ccache hit | 1 | 0ms | 10ms | **~15-20ms** |
+| Approach | Ring | Compile | Diff | Total | Notes |
+|----------|------|---------|------|-------|-------|
+| Current (cosmocc full) | 0 | 200-400ms | 10ms | **~200-500ms** | Baseline |
+| **Ring 0 AST (Lemon+lexgen)** | **0** | 10-20ms | 10-20ms | **~30-50ms** | **Recommended** |
+| ccache hit | 1 | 0ms | 10ms | **~15-20ms** | Cache warm |
+| Binaryen WASM (ludoplex) | 1 | 50ms | 5ms | **~60-80ms** | .com + .wasm |
+| LLVM IR (clang) | 2 | 50ms | 10ms | **~70-100ms** | C++ dependency |
+| ~~TinyCC (libtcc)~~ | ❌ | — | — | **N/A** | Incompatible |
 
-*TinyCC is Ring 0 compatible (pure C, can vendor)
+> **Why no TinyCC?** TinyCC produces "Invalid relocation entry" errors when linking
+> with `cosmopolitan.a`. This is a fundamental incompatibility - do not attempt.
+
+> **Binaryen is OK:** Use `ludoplex/binaryen` fork which provides Cosmopolitan-
+> compatible outputs (.com and .wasm). The WASM module can be embedded in ZipOS.
 
 ---
 
@@ -515,7 +534,7 @@ int c11_parser_init(C11ParseContext *ctx, int c_standard) {
 
 ## 12. Summary
 
-**Full Ring 0 Dogfooding:**
+**Full Ring 0 Dogfooding (Pure C, No C++ Required):**
 
 | Component | Spec File | Generator | Output |
 |-----------|-----------|-----------|--------|
@@ -528,11 +547,19 @@ int c11_parser_init(C11ParseContext *ctx, int c_standard) {
 | Tests | ir_patch.feature | bddgen | ir_patch_bdd.c |
 
 **Benefits:**
-- **4-8x faster** than current approach (~30-80ms vs ~200-500ms)
+- **4-8x faster** than current approach (~30-50ms vs ~200-500ms)
 - **Ring 0 only** - no external toolchains required
+- **Pure C** - no C++ dependencies (Binaryen, libclang not needed)
+- **Cosmopolitan compatible** - builds with cosmocc to APE
 - **C version abstracted** - supports C89 through C23
 - **Fully dogfooded** - uses CosmicRingForge generators
 - **Drift-gated** - CI verifies generated code matches specs
+
+**Tool Status:**
+- ✅ **Binaryen** - OK via ludoplex/binaryen (.com + .wasm, embeddable in ZipOS)
+- ✅ **Clang** - OK, cosmocc bundles Clang 19 (`-mclang` for 3x faster C++ compile)
+- ❌ ~~TinyCC~~ - BANNED, incompatible with Cosmopolitan (relocation errors)
+- ⚠️ ~~libclang~~ - Avoid, programmatic AST access has relocation issues (note: libclang ≠ clang)
 
 ---
 
