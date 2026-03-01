@@ -6,7 +6,11 @@
  *   Windows: ReadProcessMemory/WriteProcessMemory
  *   Self:    mprotect + direct access
  *
- * Generated types from: specs/domain/procmem.schema
+ * ═══════════════════════════════════════════════════════════════════════════
+ * RING 0 COMPOSABILITY:
+ *   Types:     procmem.schema → schemagen → procmem_types.h
+ *   Constants: procmem.def → X-macro expansion (below)
+ * ═══════════════════════════════════════════════════════════════════════════
  */
 
 #ifndef E9_PROCMEM_H
@@ -14,36 +18,56 @@
 
 #include <stdint.h>
 #include <stddef.h>
+#include <string.h>
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Constants
+ * X-Macro Definitions (from specs/domain/procmem.def)
+ * Single source of truth for all constants
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-#define PROCMEM_READ    0x01
-#define PROCMEM_WRITE   0x02
-#define PROCMEM_EXECUTE 0x04
+/* Memory Access Flags */
+#define MEMACCESS_XMACRO(X) \
+    X(PROCMEM_READ,    0x01, "READ")    \
+    X(PROCMEM_WRITE,   0x02, "WRITE")   \
+    X(PROCMEM_EXECUTE, 0x04, "EXECUTE")
 
-/* OS types */
-#define PROCMEM_OS_UNKNOWN  0
-#define PROCMEM_OS_LINUX    1
-#define PROCMEM_OS_WINDOWS  2
-#define PROCMEM_OS_MACOS    3
-#define PROCMEM_OS_BSD      4
+/* Operating System */
+#define PROCMEM_OS_XMACRO(X) \
+    X(PROCMEM_OS_UNKNOWN, 0, "unknown") \
+    X(PROCMEM_OS_LINUX,   1, "linux")   \
+    X(PROCMEM_OS_WINDOWS, 2, "windows") \
+    X(PROCMEM_OS_MACOS,   3, "macos")   \
+    X(PROCMEM_OS_BSD,     4, "bsd")
 
-/* Arch types */
-#define PROCMEM_ARCH_UNKNOWN 0
-#define PROCMEM_ARCH_X86_64  1
-#define PROCMEM_ARCH_AARCH64 2
+/* Architecture */
+#define PROCMEM_ARCH_XMACRO(X) \
+    X(PROCMEM_ARCH_UNKNOWN, 0, "unknown") \
+    X(PROCMEM_ARCH_X86_64,  1, "x86_64")  \
+    X(PROCMEM_ARCH_AARCH64, 2, "aarch64")
 
-/* Status codes */
-#define PROCMEM_OK           0
-#define PROCMEM_ERR_ACCESS  -1
-#define PROCMEM_ERR_NOTFOUND -2
-#define PROCMEM_ERR_PERM    -3
-#define PROCMEM_ERR_PLATFORM -4
+/* Status Codes */
+#define PROCMEM_STATUS_XMACRO(X) \
+    X(PROCMEM_OK,           0,  "ok")        \
+    X(PROCMEM_ERR_ACCESS,  -1,  "access")    \
+    X(PROCMEM_ERR_NOTFOUND,-2,  "notfound")  \
+    X(PROCMEM_ERR_PERM,    -3,  "perm")      \
+    X(PROCMEM_ERR_PLATFORM,-4,  "platform")
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Types (mirrors generated procmem_types.h)
+ * Constants (expanded from X-macros)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+/* Expand X-macros to #define constants */
+#define X(name, val, str) static const int name = val;
+MEMACCESS_XMACRO(X)
+PROCMEM_OS_XMACRO(X)
+PROCMEM_ARCH_XMACRO(X)
+PROCMEM_STATUS_XMACRO(X)
+#undef X
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * Types (from specs/domain/procmem.schema via schemagen)
+ * Could #include "procmem_types.h" but inlined for standalone use
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 typedef struct {
@@ -62,6 +86,37 @@ typedef struct {
     int32_t  can_self;      /* Can self-patch (always 1) */
     char     backend[32];   /* "process_vm", "win32", "mach", "self" */
 } E9PlatformInfo;
+
+/* ═══════════════════════════════════════════════════════════════════════════
+ * String Conversion (generated from X-macros)
+ * ═══════════════════════════════════════════════════════════════════════════ */
+
+static inline const char* procmem_os_str(int os) {
+    switch(os) {
+#define X(name, val, str) case val: return str;
+        PROCMEM_OS_XMACRO(X)
+#undef X
+    }
+    return "unknown";
+}
+
+static inline const char* procmem_arch_str(int arch) {
+    switch(arch) {
+#define X(name, val, str) case val: return str;
+        PROCMEM_ARCH_XMACRO(X)
+#undef X
+    }
+    return "unknown";
+}
+
+static inline const char* procmem_status_str(int status) {
+    switch(status) {
+#define X(name, val, str) case val: return str;
+        PROCMEM_STATUS_XMACRO(X)
+#undef X
+    }
+    return "unknown";
+}
 
 /* ═══════════════════════════════════════════════════════════════════════════
  * API

@@ -169,6 +169,8 @@ static int compile_source(const char *source, const char *output) {
  * Symbol Extraction
  * ═══════════════════════════════════════════════════════════════════════════ */
 
+/* TODO: Used when WAMR/Binaryen integration is complete */
+__attribute__((unused))
 static int get_function_info(const char *object_file, const char *func_name,
                               FunctionInfo *info) {
     char cmd[512];
@@ -403,7 +405,7 @@ static int apply_patch(int pid, PatchData *patch) {
 }
 
 static int handle_file_change(const char *source_file) {
-    char old_obj[MAX_PATH], new_obj[MAX_PATH];
+    char old_obj[512], new_obj[512];
     char basename[64];
 
     /* Extract basename */
@@ -584,7 +586,7 @@ int main(int argc, char **argv) {
     log_info("Watching %s (polling every 100ms)", source_file);
 
     /* Initial compilation */
-    char initial_obj[MAX_PATH];
+    char initial_obj[512];
     snprintf(initial_obj, sizeof(initial_obj), "%s/target.o", g_state.cache_dir);
     if (compile_source(source_file, initial_obj) == 0) {
         log_info("Baseline established");
