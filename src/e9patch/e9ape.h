@@ -1,21 +1,27 @@
 /*
  * e9ape.h
  * APE (Actually Portable Executable) Binary Rewriting Support
+ * ═══════════════════════════════════════════════════════════════════════
  *
- * APE binaries are polyglot executables that are simultaneously valid as:
- *   - DOS/MZ executable (for Windows)
- *   - ELF executable (for Linux/BSD)
- *   - Shell script (for Unix bootstrapping)
- *   - ZIP archive (ZipOS embedded filesystem)
+ * Based on RE analysis of actual APE binary (cosmocc output).
  *
- * When patching an APE binary, we must:
- *   1. Parse and understand all format layers
- *   2. Apply patches consistently to both ELF and PE views
- *   3. Preserve the shell script header
- *   4. Preserve ZipOS content (or update it if requested)
- *   5. Maintain polyglot validity across all formats
+ * KEY INSIGHT: APE has NO x86-64 ELF header embedded!
  *
- * Pure C implementation for dogfooding with cosmicringforge C generators.
+ * Structure discovered via RE:
+ *   0x00000 - MZ header "MZqFpD" + shell script bootstrap
+ *   0x10A58 - PE header (e_lfanew points here)
+ *   0x11000 - .text section (file offset == RVA in APE)
+ *   0x2F000 - .rdata section
+ *   0x35000 - .data section
+ *   0x3C000 - ARM64 ELF (for aarch64 only)
+ *   EOF-256 - ZipOS (.cosmo, .symtab.*)
+ *
+ * For patching x86-64:
+ *   - Use PE sections as ground truth
+ *   - file_offset often equals RVA
+ *   - No ELF program headers to parse
+ *
+ * Pure C implementation for cosmicringforge dogfooding.
  *
  * Copyright (C) 2024 E9Patch Contributors
  * License: GPLv3+
@@ -27,92 +33,45 @@
 #include <stdint.h>
 #include <stddef.h>
 #include <stdbool.h>
-#include <elf.h>
+#include <stdio.h>
+#include <sys/types.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
 
 /*
- * APE Magic signatures
- */
-#define APE_MAGIC_MZ        "MZqFpD"
-#define APE_MAGIC_SHELL     "#!/"
-
-/*
- * PE structures (minimal, for parsing)
+ * APE Info structure (opaque, use accessors)
  */
 typedef struct {
-    uint16_t Machine;
-    uint16_t NumberOfSections;
-    uint32_t TimeDateStamp;
-    uint32_t PointerToSymbolTable;
-    uint32_t NumberOfSymbols;
-    uint16_t SizeOfOptionalHeader;
-    uint16_t Characteristics;
-} E9_PE_FILE_HEADER;
+    /* File info */
+    size_t file_size;
+    bool is_cosmopolitan;
 
-typedef struct {
-    uint16_t Magic;
-    uint8_t MajorLinkerVersion;
-    uint8_t MinorLinkerVersion;
-    uint32_t SizeOfCode;
-    uint32_t SizeOfInitializedData;
-    uint32_t SizeOfUninitializedData;
-    uint32_t AddressOfEntryPoint;
-    uint32_t BaseOfCode;
-    uint64_t ImageBase;
-    uint32_t SectionAlignment;
-    uint32_t FileAlignment;
-    uint16_t MajorOSVersion;
-    uint16_t MinorOSVersion;
-    uint16_t MajorImageVersion;
-    uint16_t MinorImageVersion;
-    uint16_t MajorSubsystemVersion;
-    uint16_t MinorSubsystemVersion;
-    uint32_t Win32VersionValue;
-    uint32_t SizeOfImage;
-    uint32_t SizeOfHeaders;
-    uint32_t CheckSum;
-    uint16_t Subsystem;
-    uint16_t DllCharacteristics;
-    uint64_t SizeOfStackReserve;
-    uint64_t SizeOfStackCommit;
-    uint64_t SizeOfHeapReserve;
-    uint64_t SizeOfHeapCommit;
-    uint32_t LoaderFlags;
-    uint32_t NumberOfRvaAndSizes;
-} E9_PE_OPTIONAL_HEADER64;
-
-typedef struct {
-    char Name[8];
-    uint32_t VirtualSize;
-    uint32_t VirtualAddress;
-    uint32_t SizeOfRawData;
-    uint32_t PointerToRawData;
-    uint32_t PointerToRelocations;
-    uint32_t PointerToLinenumbers;
-    uint16_t NumberOfRelocations;
-    uint16_t NumberOfLinenumbers;
-    uint32_t Characteristics;
-} E9_PE_SECTION_HEADER;
-
-/*
- * APE Info structure
- */
-typedef struct {
-    /* ELF view */
-    Elf64_Ehdr *elf_ehdr;
-    off_t elf_offset;
-    size_t elf_size;
-
-    /* PE view */
-    E9_PE_FILE_HEADER *pe_file_hdr;
-    E9_PE_OPTIONAL_HEADER64 *pe_opt_hdr;
-    E9_PE_SECTION_HEADER *pe_sections;
-    uint16_t pe_num_sections;
+    /* PE location */
     off_t pe_offset;
     size_t pe_size;
+    uint16_t pe_num_sections;
 
-    /* Shell script */
-    off_t shell_offset;
-    size_t shell_size;
+    /* Section cache (for fast patching) */
+    off_t text_offset;
+    uint32_t text_rva;
+    size_t text_size;
+
+    off_t rdata_offset;
+    uint32_t rdata_rva;
+    size_t rdata_size;
+
+    off_t data_offset;
+    uint32_t data_rva;
+    size_t data_size;
+
+    /* Embedded architectures */
+    bool has_arm64_elf;
+    off_t arm64_elf_offset;
+
+    bool is_assimilated;   /* Has ELF header (--assimilate was run) */
+    off_t x86_elf_offset;
 
     /* ZipOS */
     off_t zipos_start;
@@ -120,17 +79,16 @@ typedef struct {
     off_t zipos_end;
     uint32_t zipos_num_entries;
 
-    /* Flags */
-    bool sync_elf_pe;       /* Sync patches to both ELF and PE views */
-    bool preserve_zipos;    /* Preserve ZipOS content on write */
+    /* Config */
+    bool preserve_zipos;
 } E9_APEInfo;
 
 /*
- * ZipOS entry descriptor
+ * ZipOS entry
  */
 typedef struct {
-    const char *name;
-    off_t offset;
+    char *name;
+    off_t local_header_offset;
     size_t compressed_size;
     size_t uncompressed_size;
     uint16_t compression;
@@ -138,45 +96,71 @@ typedef struct {
     bool is_directory;
 } E9_ZipOSEntry;
 
-/* ── Detection ─────────────────────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════════════════
+ * Detection
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 /*
  * Check if data is APE format
+ * Returns true if MZqFpD magic or MZ+PE with heredoc
  */
 bool e9_ape_detect(const uint8_t *data, size_t size);
 
 /*
- * Parse APE structure into info
+ * Parse APE structure
  * Returns 0 on success, -1 on error
  */
 int e9_ape_parse(const uint8_t *data, size_t size, E9_APEInfo *info);
 
-/* ── Address Translation ───────────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════════════════
+ * Address Translation
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 /*
- * Convert ELF virtual address to file offset
- * Returns -1 on error
+ * Convert PE RVA to file offset
+ * PRIMARY method for APE - uses PE section table
+ * Returns -1 if RVA not found in any section
  */
-off_t e9_ape_elf_vaddr_to_offset(const uint8_t *data, const E9_APEInfo *info,
-                                  uint64_t vaddr);
+off_t e9_ape_rva_to_offset(const E9_APEInfo *info, uint32_t rva);
 
 /*
- * Convert PE virtual address to file offset
- * Returns -1 on error
+ * Convert file offset to PE RVA
+ * Returns 0 if offset not in mapped section
  */
-off_t e9_ape_pe_vaddr_to_offset(const E9_APEInfo *info, uint64_t vaddr);
+uint32_t e9_ape_offset_to_rva(const E9_APEInfo *info, off_t offset);
 
-/* ── Patching ──────────────────────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════════════════
+ * Patching
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 /*
- * Apply patch to APE binary
- * Patches at ELF virtual address; if sync_elf_pe is set, also syncs to PE
+ * Apply patch at file offset (RECOMMENDED)
+ * Directly patches bytes at specified offset
+ * Returns 0 on success, -1 on error
+ */
+int e9_ape_patch_offset(uint8_t *data, size_t size, const E9_APEInfo *info,
+                        off_t offset, const uint8_t *patch, size_t patch_size);
+
+/*
+ * Apply patch at PE RVA
+ * Converts RVA to file offset, then patches
+ * Returns 0 on success, -1 on error
+ */
+int e9_ape_patch_rva(uint8_t *data, size_t size, const E9_APEInfo *info,
+                     uint32_t rva, const uint8_t *patch, size_t patch_size);
+
+/*
+ * Apply patch at virtual address (LEGACY)
+ * For compatibility with ELF-style addresses
+ * Assumes VA = 0x400000 + RVA (typical APE layout)
  * Returns 0 on success, -1 on error
  */
 int e9_ape_patch(uint8_t *data, size_t size, const E9_APEInfo *info,
-                  uint64_t elf_vaddr, const uint8_t *patch, size_t patch_size);
+                 uint64_t vaddr, const uint8_t *patch, size_t patch_size);
 
-/* ── ZipOS ─────────────────────────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════════════════
+ * ZipOS
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 /*
  * List ZipOS entries
@@ -191,24 +175,34 @@ E9_ZipOSEntry *e9_ape_zipos_list(const uint8_t *data, size_t size,
 void e9_ape_zipos_free_list(E9_ZipOSEntry *entries, size_t count);
 
 /*
- * Read uncompressed file from ZipOS
- * Returns allocated buffer (caller must free) or NULL on error
- */
-uint8_t *e9_ape_zipos_read(const uint8_t *data, size_t size,
-                            const E9_APEInfo *info, const char *path,
-                            size_t *out_size);
-
-/*
  * Check if path exists in ZipOS
  */
 bool e9_ape_zipos_exists(const uint8_t *data, size_t size,
                           const E9_APEInfo *info, const char *path);
 
-/* ── Utilities ─────────────────────────────────────────────────────── */
+/* ═══════════════════════════════════════════════════════════════════════
+ * Utilities
+ * ═══════════════════════════════════════════════════════════════════════ */
 
 /*
- * Get self executable path (for hot-patching)
+ * Get path to self executable (for hot-patching)
  */
 const char *e9_ape_get_self_path(void);
+
+/*
+ * Debug: dump APE info to file
+ */
+void e9_ape_dump_info(const E9_APEInfo *info, FILE *out);
+
+/* ═══════════════════════════════════════════════════════════════════════
+ * Constants
+ * ═══════════════════════════════════════════════════════════════════════ */
+
+#define E9_APE_MAGIC_COSMO     "MZqFpD"
+#define E9_APE_DEFAULT_BASE    0x400000
+
+#ifdef __cplusplus
+}
+#endif
 
 #endif /* E9APE_H */
