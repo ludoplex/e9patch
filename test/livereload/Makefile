@@ -40,16 +40,20 @@ GEN_TYPES = $(GEN_DIR)/livereload_types.c
 
 all: native
 
-# Standalone livereload (ptrace-based, uses cosmicringforge generated types)
+# Standalone livereload (unified procmem API, uses cosmicringforge generated types)
+# No sudo needed if you own the target process!
+E9PROCMEM_SRC = $(E9PATCH_DIR)/e9procmem.c
+
 standalone: target livereload
-	@echo "Standalone build complete (ptrace-based live reload)"
+	@echo "Standalone build complete (unified procmem API)"
 	@echo "  ./target     - Test target program"
 	@echo "  ./livereload - Live reload with hot-patching"
 	@echo ""
-	@echo "Usage: sudo ./livereload <PID> [source_file]"
+	@echo "Usage: ./livereload <PID> [source_file]"
+	@echo "(sudo only needed if patching another user's process)"
 
-livereload: livereload.c $(GEN_TYPES)
-	$(CC) $(CFLAGS) -I$(GEN_DIR) -o $@ $^
+livereload: livereload.c $(E9PROCMEM_SRC) $(GEN_TYPES)
+	$(CC) $(CFLAGS) -I$(E9PATCH_DIR) -I$(GEN_DIR) -o $@ $^
 
 # Simple test (no WAMR dependency) - quick proof of concept
 simple: target test_simple

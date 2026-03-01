@@ -36,15 +36,11 @@
 #include <sys/wait.h>
 #include <stdarg.h>
 
-/* Platform-specific includes for ptrace */
+/* Platform includes - no ptrace needed with unified procmem API */
+#include <sys/mman.h>
 #ifdef __COSMOPOLITAN__
-  #include <libc/calls/calls.h>       /* ptrace() */
-  #include <libc/sysv/consts/ptrace.h> /* PTRACE_* constants */
-  #include <sys/mman.h>
-#else
-  #include <sys/ptrace.h>
-  #include <sys/user.h>
-  #include <sys/mman.h>
+  #define _COSMO_SOURCE
+  #include <libc/dce.h>
 #endif
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -306,89 +302,63 @@ static int diff_functions(const char *old_obj, const char *new_obj,
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
- * Process Patching (ptrace)
+ * Process Patching (unified e9procmem API)
+ *
+ * Uses process_vm_readv/writev on Linux (no ptrace, no stop required!)
+ * Uses ReadProcessMemory/WriteProcessMemory on Windows
  * ═══════════════════════════════════════════════════════════════════════════ */
 
-static int attach_process(int pid) {
-    if (ptrace(PTRACE_ATTACH, pid, NULL, NULL) < 0) {
-        log_error("Cannot attach to PID %d: %s", pid, strerror(errno));
+#include "../../src/e9patch/e9procmem.h"
+
+static E9ProcHandle g_proc_handle;
+static int g_proc_initialized = 0;
+
+static int init_procmem(int pid) {
+    if (g_proc_initialized) return 0;
+
+    E9PlatformInfo info;
+    e9_procmem_get_platform(&info);
+    log_info("Platform: %s (backend: %s)",
+             info.os == PROCMEM_OS_LINUX ? "Linux" :
+             info.os == PROCMEM_OS_WINDOWS ? "Windows" :
+             info.os == PROCMEM_OS_MACOS ? "macOS" : "Unknown",
+             info.backend);
+
+    int ret = e9_procmem_open(&g_proc_handle, pid, PROCMEM_READ | PROCMEM_WRITE);
+    if (ret != PROCMEM_OK) {
+        log_error("Cannot open process %d: %s", pid, e9_procmem_error(&g_proc_handle));
         return -1;
     }
 
-    int status;
-    waitpid(pid, &status, 0);
+    g_proc_initialized = 1;
+    return 0;
+}
 
-    if (!WIFSTOPPED(status)) {
-        log_error("Process did not stop");
-        ptrace(PTRACE_DETACH, pid, NULL, NULL);
+static void cleanup_procmem(void) {
+    if (g_proc_initialized) {
+        e9_procmem_close(&g_proc_handle);
+        g_proc_initialized = 0;
+    }
+}
+
+static int read_memory(uint64_t addr, void *buf, size_t len) {
+    int ret = e9_procmem_read(&g_proc_handle, addr, buf, len);
+    if (ret != PROCMEM_OK) {
+        log_error("Read failed at 0x%lx: %s", (unsigned long)addr,
+                  e9_procmem_error(&g_proc_handle));
         return -1;
     }
-
     return 0;
 }
 
-static int detach_process(int pid) {
-    return ptrace(PTRACE_DETACH, pid, NULL, NULL);
-}
-
-static int read_memory(int pid, uint64_t addr, void *buf, size_t len) {
-    size_t i;
-    long *dst = (long *)buf;
-
-    for (i = 0; i < len; i += sizeof(long)) {
-        errno = 0;
-        long word = ptrace(PTRACE_PEEKDATA, pid, addr + i, NULL);
-        if (errno != 0) {
-            return -1;
-        }
-        dst[i / sizeof(long)] = word;
+static int write_memory(uint64_t addr, const void *buf, size_t len) {
+    int ret = e9_procmem_write(&g_proc_handle, addr, buf, len);
+    if (ret != PROCMEM_OK) {
+        log_error("Write failed at 0x%lx: %s", (unsigned long)addr,
+                  e9_procmem_error(&g_proc_handle));
+        return -1;
     }
-
     return 0;
-}
-
-static int write_memory(int pid, uint64_t addr, const void *buf, size_t len) {
-    size_t i;
-    const long *src = (const long *)buf;
-
-    for (i = 0; i < len; i += sizeof(long)) {
-        if (ptrace(PTRACE_POKEDATA, pid, addr + i, src[i / sizeof(long)]) < 0) {
-            return -1;
-        }
-    }
-
-    return 0;
-}
-
-/* ═══════════════════════════════════════════════════════════════════════════
- * ICache Flush
- * ═══════════════════════════════════════════════════════════════════════════ */
-
-static void flush_icache(uint64_t addr, size_t size) {
-    /*
-     * On x86-64, instruction cache is coherent with data cache,
-     * so no explicit flush is needed for self-modifying code.
-     *
-     * However, the CPU may still have stale instructions in the
-     * pipeline. We use a serializing instruction to ensure
-     * the new code is visible.
-     */
-#if defined(__x86_64__) || defined(_M_X64)
-    /* x86-64: CPUID serializes instruction stream */
-    __asm__ volatile("cpuid" ::: "eax", "ebx", "ecx", "edx", "memory");
-#elif defined(__aarch64__)
-    /* AArch64: explicit cache maintenance */
-    __asm__ volatile(
-        "dc cvau, %0\n"
-        "dsb ish\n"
-        "ic ivau, %0\n"
-        "dsb ish\n"
-        "isb\n"
-        :: "r"(addr)
-    );
-#endif
-    (void)addr;
-    (void)size;
 }
 
 /* ═══════════════════════════════════════════════════════════════════════════
@@ -396,6 +366,11 @@ static void flush_icache(uint64_t addr, size_t size) {
  * ═══════════════════════════════════════════════════════════════════════════ */
 
 static int apply_patch(int pid, PatchData *patch) {
+    /* Initialize procmem if needed */
+    if (init_procmem(pid) != 0) {
+        return -1;
+    }
+
     uint64_t addr = get_runtime_address(pid, patch->info.function_name);
     if (addr == 0) {
         log_error("Cannot find runtime address for '%s'", patch->info.function_name);
@@ -407,31 +382,19 @@ static int apply_patch(int pid, PatchData *patch) {
     log_info("Patching '%s' at 0x%lx (%zu bytes)",
              patch->info.function_name, addr, patch->patch_size);
 
-    /* Attach to process */
-    if (attach_process(pid) != 0) {
-        return -1;
-    }
-
     /* Read current bytes (for verification/revert) */
     uint8_t current[MAX_PATCH_SIZE];
-    if (read_memory(pid, addr, current, patch->patch_size) != 0) {
-        log_error("Cannot read memory at 0x%lx", addr);
-        detach_process(pid);
+    if (read_memory(addr, current, patch->patch_size) != 0) {
         return -1;
     }
 
-    /* Write new bytes */
-    if (write_memory(pid, addr, patch->new_bytes, patch->patch_size) != 0) {
-        log_error("Cannot write memory at 0x%lx: %s", addr, strerror(errno));
-        detach_process(pid);
+    /* Write new bytes (no stop required with process_vm_writev!) */
+    if (write_memory(addr, patch->new_bytes, patch->patch_size) != 0) {
         return -1;
     }
 
     /* Flush instruction cache */
-    flush_icache(addr, patch->patch_size);
-
-    /* Detach and continue */
-    detach_process(pid);
+    e9_procmem_flush_icache(addr, patch->patch_size);
 
     log_success("Patch applied: %s @ 0x%lx", patch->info.function_name, addr);
     g_state.patches_applied++;
@@ -589,12 +552,9 @@ int main(int argc, char **argv) {
         return 1;
     }
 
-    /* Check for root (needed for ptrace) */
-    if (geteuid() != 0) {
-        log_error("Root privileges required for ptrace");
-        log_info("Try: sudo %s %d %s", argv[0], g_state.target_pid, source_file);
-        return 1;
-    }
+    /* Note: With process_vm_writev we don't need root if we own the process.
+     * Root is only needed if /proc/sys/kernel/yama/ptrace_scope > 0 and
+     * we're patching a process we don't own. */
 
     strncpy(g_state.source_file, source_file, MAX_PATH - 1);
     snprintf(g_state.cache_dir, MAX_PATH, "%s", CACHE_DIR);
@@ -636,6 +596,8 @@ int main(int argc, char **argv) {
         usleep(100000);  /* 100ms */
     }
 
+    /* Cleanup */
+    cleanup_procmem();
     print_stats();
 
     return 0;
