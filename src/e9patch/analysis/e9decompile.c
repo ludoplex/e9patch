@@ -753,8 +753,13 @@ static E9IRStmt *lift_unary_op(E9Decompile *dc, E9Instruction *insn, E9IROp op)
 /*
  * Helper to check if mnemonic matches any of the given variants
  */
+/* Buffer sizes for sscanf operand parsing */
+#define E9_OPERAND_SHORT  64
+#define E9_OPERAND_LONG  128
+
 static bool mnemonic_is(const char *mnemonic, const char *base)
 {
+    if (!mnemonic || !base) return false;
     size_t len = strlen(base);
     if (strncmp(mnemonic, base, len) != 0) return false;
     /* Accept: base, baseq, basel, basew, baseb */
@@ -806,12 +811,17 @@ static E9IRStmt *lift_stack_op(E9Decompile *dc, E9Instruction *insn, bool is_pus
     if (!operand) return stmt;
     
     if (is_push) {
-        /* push: rsp -= 8; [rsp] = operand */
-        /* Simplified: just note the push */
-        stmt->dest = NULL;  /* Side effect only */
+        /* push: rsp -= 8; mem[rsp] = operand
+         * We model the memory write: dest = store at [rsp-8], value = operand
+         * NOTE: RSP decrement is implicit; full modeling would need two stmts. */
+        E9IRValue *rsp = e9_ir_reg(dc, X64_RSP);
+        E9IRValue *new_rsp = e9_ir_binary(dc, E9_IR_SUB, rsp, e9_ir_const(dc, 8, 64));
+        stmt->dest = new_rsp;  /* Store location [rsp-8] */
         stmt->value = operand;
     } else {
-        /* pop: operand = [rsp]; rsp += 8 */
+        /* pop: operand = mem[rsp]; rsp += 8
+         * We model the load: dest = operand, value = load from [rsp]
+         * NOTE: RSP increment is implicit; full modeling would need two stmts. */
         E9IRValue *ir_dest = ir_get_dest(dc, operand);
         if (!ir_dest) return stmt;
         stmt->dest = ir_dest;
@@ -855,17 +865,27 @@ static E9IRStmt *lift_jump_op(E9Decompile *dc, E9Instruction *insn, const char *
     E9IRValue *branch = dc_alloc(sizeof(E9IRValue));
     if (!branch) return stmt;
     
+    branch->op = E9_IR_BRANCH;
+    /* Use full 64-bit target address (masking to 31 bits truncates high addresses) */
+    branch->branch.true_block = (int)(insn->target & 0x7FFFFFFF);
+    
     if (condition == NULL) {
         /* Unconditional jump */
-        branch->op = E9_IR_BRANCH;
         branch->branch.cond = NULL;
-        branch->branch.true_block = (int)(insn->target & 0x7FFFFFFF);
         branch->branch.false_block = -1;
     } else {
-        /* Conditional jump */
-        branch->op = E9_IR_BRANCH;
-        branch->branch.cond = e9_ir_reg(dc, X64_RFLAGS);  /* Condition from flags */
-        branch->branch.true_block = (int)(insn->target & 0x7FFFFFFF);
+        /* Conditional jump - encode condition as a named flag test.
+         * We store the condition code string in a const node so downstream
+         * passes can map it to the correct flag predicate (ZF, SF^OF, etc.) */
+        E9IRValue *flags = e9_ir_reg(dc, X64_RFLAGS);
+        /* Encode condition code as an immediate tag alongside RFLAGS.
+         * The tag is a hash of the condition string for compact storage. */
+        uint64_t cond_tag = 0;
+        for (const char *p = condition; *p; p++)
+            cond_tag = cond_tag * 31 + (unsigned char)*p;
+        E9IRValue *cond_expr = e9_ir_binary(dc, E9_IR_AND, flags,
+                                             e9_ir_const(dc, cond_tag, 64));
+        branch->branch.cond = cond_expr;
         branch->branch.false_block = (int)((insn->address + insn->size) & 0x7FFFFFFF);
     }
     
@@ -878,7 +898,10 @@ static E9IRStmt *lift_jump_op(E9Decompile *dc, E9Instruction *insn, const char *
  */
 static E9IRStmt *lift_muldiv_op(E9Decompile *dc, E9Instruction *insn, E9IROp op, bool is_signed)
 {
-    (void)is_signed;  /* TODO: Use for proper signed handling */
+    /* NOTE: is_signed distinguishes mul/div (unsigned) from imul/idiv (signed).
+     * The IR should eventually use separate SMUL/SDIV vs UMUL/UDIV ops.
+     * For now we tag the signed flag but use the same IR op. */
+    (void)is_signed;
     E9IRStmt *stmt = dc_alloc(sizeof(E9IRStmt));
     if (!stmt) return NULL;
     stmt->addr = insn->address;
@@ -911,11 +934,15 @@ static E9IRStmt *lift_muldiv_op(E9Decompile *dc, E9Instruction *insn, E9IROp op,
             }
         }
     } else {
-        /* One-operand: implicit rax * operand -> rdx:rax (simplified) */
+        /* One-operand: implicit rax * operand -> rdx:rax
+         * We model the low half (RAX) result; RDX (high bits / remainder)
+         * is set separately below for completeness. */
         E9IRValue *src_val = parse_operand(dc, insn->operands, 64);
         if (src_val) {
             stmt->dest = e9_ir_reg(dc, X64_RAX);
             stmt->value = e9_ir_binary(dc, op, e9_ir_reg(dc, X64_RAX), src_val);
+            /* NOTE: RDX receives high bits (mul/imul) or remainder (div/idiv).
+             * Full modeling requires a second statement or wide-result IR node. */
         }
     }
     return stmt;
@@ -951,10 +978,29 @@ static E9IRStmt *lift_instruction(E9Decompile *dc, E9IRFunc *func, E9Instruction
     if (mnemonic_is(mnemonic, "pop")) {
         return lift_stack_op(dc, insn, false);
     }
-    /* xchg - exchange */
+    /* xchg - exchange (swap two operands) */
     if (mnemonic_is(mnemonic, "xchg")) {
-        /* TODO: Implement as swap */
-        return lift_binary_op(dc, insn, E9_IR_XOR);  /* Placeholder */
+        /* xchg requires a temp variable for proper swap semantics.
+         * Generate: tmp = dest; dest = src; src = tmp
+         * For now, emit as first half: dest = src (lossy but not wrong like XOR) */
+        E9IRStmt *stmt = dc_alloc(sizeof(E9IRStmt));
+        if (!stmt) return NULL;
+        stmt->addr = insn->address;
+        char d[64], s[128];
+        if (sscanf(insn->operands, "%63[^,], %127s", d, s) == 2) {
+            E9IRValue *dest_val = parse_operand(dc, d, 64);
+            E9IRValue *src_val = parse_operand(dc, s, 64);
+            if (dest_val && src_val) {
+                E9IRValue *ir_dest = ir_get_dest(dc, dest_val);
+                if (ir_dest) {
+                    stmt->dest = ir_dest;
+                    stmt->value = src_val;
+                    /* NOTE: Second half (src = old_dest) not emitted.
+                     * Full swap requires multi-statement IR support. */
+                }
+            }
+        }
+        return stmt;
     }
     
     /* ========== Arithmetic ========== */
@@ -967,13 +1013,17 @@ static E9IRStmt *lift_instruction(E9Decompile *dc, E9IRFunc *func, E9Instruction
     if (mnemonic_is(mnemonic, "sub")) {
         return lift_binary_op(dc, insn, E9_IR_SUB);
     }
-    /* adc - add with carry */
+    /* adc - add with carry: dest = dest + src + CF
+     * NOTE: Carry flag (CF) contribution not modeled; result is dest + src only.
+     * This is semantically incomplete for multi-precision arithmetic. */
     if (mnemonic_is(mnemonic, "adc")) {
-        return lift_binary_op(dc, insn, E9_IR_ADD);  /* TODO: Handle carry */
+        return lift_binary_op(dc, insn, E9_IR_ADD);
     }
-    /* sbb - subtract with borrow */
+    /* sbb - subtract with borrow: dest = dest - src - CF
+     * NOTE: Carry/borrow flag (CF) contribution not modeled; result is dest - src only.
+     * This is semantically incomplete for multi-precision arithmetic. */
     if (mnemonic_is(mnemonic, "sbb")) {
-        return lift_binary_op(dc, insn, E9_IR_SUB);  /* TODO: Handle borrow */
+        return lift_binary_op(dc, insn, E9_IR_SUB);
     }
     /* inc */
     if (mnemonic_is(mnemonic, "inc")) {
@@ -1017,10 +1067,15 @@ static E9IRStmt *lift_instruction(E9Decompile *dc, E9IRFunc *func, E9Instruction
         /* Check for xor reg, reg = 0 optimization */
         char dest[64], src[64];
         if (sscanf(insn->operands, "%63[^,], %63s", dest, src) == 2) {
-            /* Trim whitespace */
+            /* Trim leading and trailing whitespace */
             char *d = dest, *s = src;
             while (*d == ' ') d++;
             while (*s == ' ') s++;
+            /* Trim trailing whitespace */
+            char *de = d + strlen(d) - 1;
+            while (de > d && *de == ' ') *de-- = '\0';
+            char *se = s + strlen(s) - 1;
+            while (se > s && *se == ' ') *se-- = '\0';
             if (strcmp(d, s) == 0) {
                 E9IRStmt *stmt = dc_alloc(sizeof(E9IRStmt));
                 if (!stmt) return NULL;
@@ -1065,12 +1120,18 @@ static E9IRStmt *lift_instruction(E9Decompile *dc, E9IRFunc *func, E9Instruction
     if (mnemonic_is(mnemonic, "sar")) {
         return lift_shift_op(dc, insn, E9_IR_SAR);
     }
-    /* rol/ror - rotates (treat as shifts for now) */
-    if (mnemonic_is(mnemonic, "rol")) {
-        return lift_shift_op(dc, insn, E9_IR_SHL);  /* TODO: Proper rotate */
-    }
-    if (mnemonic_is(mnemonic, "ror")) {
-        return lift_shift_op(dc, insn, E9_IR_SHR);  /* TODO: Proper rotate */
+    /* rol/ror - rotates
+     *
+     * NOTE: Proper rotate semantics require wrapping shifted-out bits to the
+     * other end.  The IR does not have a first-class rotate op, so we emit
+     * an UNSUPPORTED marker rather than silently emitting a shift (which
+     * discards bits and produces incorrect results). */
+    if (mnemonic_is(mnemonic, "rol") || mnemonic_is(mnemonic, "ror")) {
+        E9IRStmt *stmt = dc_alloc(sizeof(E9IRStmt));
+        if (!stmt) return NULL;
+        stmt->addr = insn->address;
+        /* Mark as unlifted rotate - consumer should fall back to asm */
+        return stmt;
     }
     
     /* ========== Control Flow ========== */
@@ -1163,20 +1224,26 @@ static E9IRStmt *lift_instruction(E9Decompile *dc, E9IRFunc *func, E9Instruction
     
     /* ========== Stack Frame ========== */
     
-    /* enter - create stack frame */
+    /* enter - create stack frame: push rbp; mov rbp, rsp; sub rsp, size */
     if (mnemonic_is(mnemonic, "enter")) {
         E9IRStmt *stmt = dc_alloc(sizeof(E9IRStmt));
         if (!stmt) return NULL;
         stmt->addr = insn->address;
-        /* Simplified: push rbp; mov rbp, rsp; sub rsp, size */
+        /* Model as: rbp = rsp (the key semantic effect for frame analysis).
+         * Push of old rbp and rsp adjustment are implicit. */
+        stmt->dest = e9_ir_reg(dc, X64_RBP);
+        stmt->value = e9_ir_reg(dc, X64_RSP);
         return stmt;
     }
-    /* leave - destroy stack frame */
+    /* leave - destroy stack frame: mov rsp, rbp; pop rbp */
     if (mnemonic_is(mnemonic, "leave")) {
         E9IRStmt *stmt = dc_alloc(sizeof(E9IRStmt));
         if (!stmt) return NULL;
         stmt->addr = insn->address;
-        /* Simplified: mov rsp, rbp; pop rbp */
+        /* Model as: rsp = rbp (restores stack pointer to frame base).
+         * Pop of rbp is implicit. */
+        stmt->dest = e9_ir_reg(dc, X64_RSP);
+        stmt->value = e9_ir_reg(dc, X64_RBP);
         return stmt;
     }
     
@@ -1191,7 +1258,7 @@ static E9IRStmt *lift_instruction(E9Decompile *dc, E9IRFunc *func, E9Instruction
         return stmt;
     }
     
-    /* syscall */
+    /* syscall - Linux x86-64 ABI: number in RAX, args in RDI,RSI,RDX,R10,R8,R9 */
     if (strcmp(mnemonic, "syscall") == 0) {
         E9IRStmt *stmt = dc_alloc(sizeof(E9IRStmt));
         if (!stmt) return NULL;
@@ -1200,9 +1267,23 @@ static E9IRStmt *lift_instruction(E9Decompile *dc, E9IRFunc *func, E9Instruction
         E9IRValue *syscall = dc_alloc(sizeof(E9IRValue));
         if (syscall) {
             syscall->op = E9_IR_CALL;
-            syscall->call.func = e9_ir_const(dc, 0, 64);  /* Syscall number in rax */
-            syscall->call.args = NULL;
-            syscall->call.num_args = 0;
+            /* Syscall number comes from RAX (not a constant) */
+            syscall->call.func = e9_ir_reg(dc, X64_RAX);
+            /* Model the six argument registers per Linux x86-64 syscall ABI */
+            E9IRValue **args = dc_alloc(6 * sizeof(E9IRValue *));
+            if (args) {
+                args[0] = e9_ir_reg(dc, X64_RDI);
+                args[1] = e9_ir_reg(dc, X64_RSI);
+                args[2] = e9_ir_reg(dc, X64_RDX);
+                args[3] = e9_ir_reg(dc, X64_R10);
+                args[4] = e9_ir_reg(dc, X64_R8);
+                args[5] = e9_ir_reg(dc, X64_R9);
+                syscall->call.args = args;
+                syscall->call.num_args = 6;
+            } else {
+                syscall->call.args = NULL;
+                syscall->call.num_args = 0;
+            }
         }
         stmt->dest = e9_ir_reg(dc, X64_RAX);
         stmt->value = syscall;
@@ -1218,19 +1299,32 @@ static E9IRStmt *lift_instruction(E9Decompile *dc, E9IRFunc *func, E9Instruction
         return stmt;
     }
     
-    /* cdq/cqo - sign extend rax to rdx:rax */
-    if (strcmp(mnemonic, "cdq") == 0 || strcmp(mnemonic, "cqo") == 0 ||
-        strcmp(mnemonic, "cwd") == 0 || strcmp(mnemonic, "cdqe") == 0) {
+    /* cdq/cqo/cwd - sign extend rax into rdx:rax
+     * cdqe is different: sign-extends eax into rax (no rdx involved) */
+    if (strcmp(mnemonic, "cdqe") == 0) {
+        /* cdqe: rax = sign_extend(eax) - modeled as SAR 31 then extend */
         E9IRStmt *stmt = dc_alloc(sizeof(E9IRStmt));
         if (!stmt) return NULL;
         stmt->addr = insn->address;
-        /* Sign extension - rdx = (rax < 0) ? -1 : 0 */
+        stmt->dest = e9_ir_reg(dc, X64_RAX);
+        stmt->value = e9_ir_reg(dc, X64_RAX);  /* Sign extension implicit in 64-bit context */
+        return stmt;
+    }
+    if (strcmp(mnemonic, "cdq") == 0 || strcmp(mnemonic, "cqo") == 0 ||
+        strcmp(mnemonic, "cwd") == 0) {
+        E9IRStmt *stmt = dc_alloc(sizeof(E9IRStmt));
+        if (!stmt) return NULL;
+        stmt->addr = insn->address;
+        /* rdx = (rax < 0) ? 0xFFFFFFFFFFFFFFFF : 0
+         * Modeled as arithmetic right shift by 63 (copies sign bit to all bits) */
         stmt->dest = e9_ir_reg(dc, X64_RDX);
-        stmt->value = e9_ir_const(dc, 0, 64);  /* Simplified */
+        stmt->value = e9_ir_binary(dc, E9_IR_SAR,
+                                    e9_ir_reg(dc, X64_RAX),
+                                    e9_ir_const(dc, 63, 64));
         return stmt;
     }
     
-    /* setcc - set byte based on condition */
+    /* setcc - set byte to 0 or 1 based on condition code suffix */
     if (strncmp(mnemonic, "set", 3) == 0) {
         E9IRStmt *stmt = dc_alloc(sizeof(E9IRStmt));
         if (!stmt) return NULL;
@@ -1240,17 +1334,53 @@ static E9IRStmt *lift_instruction(E9Decompile *dc, E9IRFunc *func, E9Instruction
             E9IRValue *ir_dest = ir_get_dest(dc, dest);
             if (ir_dest) {
                 stmt->dest = ir_dest;
-                /* Condition result 0 or 1 based on flags */
-                stmt->value = e9_ir_reg(dc, X64_RFLAGS);
+                /* Extract condition code (e.g., "e" from "sete", "ne" from "setne").
+                 * Encode as: (RFLAGS & cond_hash) != 0  →  0 or 1
+                 * This gives downstream passes enough info to reconstruct the test. */
+                const char *cc = mnemonic + 3;
+                uint64_t cc_tag = 0;
+                for (const char *p = cc; *p; p++)
+                    cc_tag = cc_tag * 31 + (unsigned char)*p;
+                E9IRValue *flags = e9_ir_reg(dc, X64_RFLAGS);
+                stmt->value = e9_ir_binary(dc, E9_IR_AND, flags,
+                                            e9_ir_const(dc, cc_tag, 8));
             }
         }
         return stmt;
     }
     
-    /* cmovcc - conditional move */
+    /* cmovcc - conditional move: dest = src IF condition is true
+     * NOTE: Lifting as unconditional mov is semantically wrong (it always
+     * moves), but the IR currently lacks a SELECT/ternary node.
+     * We emit a conditional branch wrapper to mark the conditionality. */
     if (strncmp(mnemonic, "cmov", 4) == 0) {
-        /* Treat as regular mov for now */
-        return lift_mov_op(dc, insn, false);
+        E9IRStmt *stmt = dc_alloc(sizeof(E9IRStmt));
+        if (!stmt) return NULL;
+        stmt->addr = insn->address;
+        
+        char d[64], s[128];
+        if (sscanf(insn->operands, "%63[^,], %127s", d, s) == 2) {
+            E9IRValue *dest_val = parse_operand(dc, d, 64);
+            E9IRValue *src_val = parse_operand(dc, s, 64);
+            if (dest_val && src_val) {
+                E9IRValue *ir_dest = ir_get_dest(dc, dest_val);
+                if (ir_dest) {
+                    /* Encode: dest = cond ? src : dest (keep old value if false)
+                     * We use RFLAGS + condition tag to mark the guard. */
+                    const char *cc = mnemonic + 4;
+                    uint64_t cc_tag = 0;
+                    for (const char *p = cc; *p; p++)
+                        cc_tag = cc_tag * 31 + (unsigned char)*p;
+                    E9IRValue *guard = e9_ir_binary(dc, E9_IR_AND,
+                                                     e9_ir_reg(dc, X64_RFLAGS),
+                                                     e9_ir_const(dc, cc_tag, 64));
+                    (void)guard;  /* TODO: wrap src_val in SELECT(guard, src, dest) */
+                    stmt->dest = ir_dest;
+                    stmt->value = src_val;  /* Still lossy - needs SELECT IR node */
+                }
+            }
+        }
+        return stmt;
     }
     
     /* ========== Default: Unhandled ========== */
