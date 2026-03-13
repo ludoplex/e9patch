@@ -19,7 +19,7 @@
  *   - Uses PE sections (via e9ape.h) for address translation
  *   - Uses Binaryen (via e9binaryen.h) for object diffing
  *   - Uses WAMR host (via e9wasm_host.h) for icache flush
- *   - No ELF assumptions for x86-64 (APE has no x86-64 ELF!)
+ *   - Both ELF and PE views map shared code sections
  *
  * Pure C implementation for cosmo-bde dogfooding.
  *

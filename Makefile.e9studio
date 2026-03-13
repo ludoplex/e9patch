@@ -60,7 +60,7 @@ ANALYSIS_SRCS = \
     src/e9patch/analysis/e9binpatch.c \
     src/e9patch/analysis/e9studio_analysis.c
 
-# APE patching (PE-based, no ELF for x86-64)
+# APE patching (ELF+PE polyglot)
 APE_SRCS = \
     src/e9patch/e9ape.c \
     src/e9patch/e9livereload.c

@@ -5,15 +5,16 @@
 # Analysis date: 2026-02-28
 #
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║ KEY FINDING: APE has NO x86-64 ELF header embedded!              ║
+# ║ APE is a polyglot: contains BOTH x86-64 ELF and PE views         ║
 # ║                                                                   ║
 # ║ Actual structure (from RE of hello.ape):                         ║
 # ║   0x00000 - MZ header + shell script bootstrap (heredoc trick)   ║
+# ║             x86-64 ELF header embedded in shell region            ║
 # ║   0x10A58 - PE header (e_lfanew points here)                     ║
 # ║   0x11000 - .text section (shared code)                          ║
 # ║   0x2F000 - .rdata section                                       ║
 # ║   0x35000 - .data section                                        ║
-# ║   0x3C000 - ARM64 ELF (for aarch64, NOT x86-64!)                 ║
+# ║   0x3C000 - ARM64 ELF (for aarch64)                              ║
 # ║   EOF-256 - ZipOS (PK signatures, .cosmo, .symtab.*)             ║
 # ║                                                                   ║
 # ║ On Linux x86-64:                                                  ║
@@ -21,9 +22,9 @@
 # ║   - Shell executes bootstrap which:                               ║
 # ║     a) Uses `ape` loader if available                            ║
 # ║     b) Or extracts loader to $TMPDIR/.ape-1.10                   ║
-# ║     c) Or --assimilate writes ELF header in-place                ║
+# ║     c) Or --assimilate overwrites MZ with ELF header             ║
 # ║                                                                   ║
-# ║ For patching: Use PE sections as ground truth for file offsets.  ║
+# ║ Both ELF and PE views map the same shared code/data sections.    ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
 # ── PE File Header (COFF) ─────────────────────────────────────────────
@@ -153,10 +154,9 @@ type E9ApeInfo {
     arm64_elf_offset: i64           # 0 if not present (e.g., 0x3C000)
     arm64_elf_size: u64
 
-    # NOTE: x86-64 has NO separate ELF! Uses PE sections directly.
-    # ELF header only exists after --assimilate
-    x86_has_elf: i32 [default: 0]   # 0 for normal APE
-    x86_elf_offset: i64             # Only valid if assimilated
+    # x86-64 ELF header is embedded in shell bootstrap region
+    x86_has_elf: i32 [default: 1]   # Normal for APE polyglot
+    x86_elf_offset: i64             # Offset of embedded x86-64 ELF header
 
     # ZipOS
     zipos_start: i64                # First PK signature

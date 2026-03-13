@@ -7,16 +7,18 @@
  *
  * KEY FINDINGS FROM RE ANALYSIS:
  *
- *   APE has NO x86-64 ELF header embedded!
+ *   APE is a polyglot containing BOTH x86-64 ELF and PE views.
  *
  *   Actual structure of hello.ape (409KB):
  *     0x00000 - MZ header "MZqFpD" + shell script bootstrap (heredoc)
+ *               x86-64 ELF header embedded in shell region
+ *               (placed where shell treats it as comment/string)
  *     0x10A58 - PE header (e_lfanew at 0x3C points here)
  *     0x10AF0 - PE section table (3 sections)
  *     0x11000 - .text section (code, file_offset == RVA)
  *     0x2F000 - .rdata section
  *     0x35000 - .data section
- *     0x3C000 - ARM64 ELF (for aarch64, NOT for x86-64!)
+ *     0x3C000 - ARM64 ELF (for aarch64)
  *     EOF-256 - ZipOS (.cosmo, .symtab.amd64, .symtab.arm64)
  *
  *   On Linux x86-64:
@@ -24,12 +26,12 @@
  *     - Shell executes bootstrap which either:
  *       a) Uses `ape` loader from PATH
  *       b) Extracts loader to $TMPDIR/.ape-X.XX
- *       c) With --assimilate, writes ELF header in-place
+ *       c) With --assimilate, overwrites MZ with ELF header
  *
  *   For patching:
- *     - Use PE sections as ground truth (file_offset == RVA in APE)
- *     - No ELF program headers to parse for x86-64
- *     - Patch file offsets directly via PE section mapping
+ *     - Both ELF and PE views map the same code/data sections
+ *     - PE section table provides canonical mapping
+ *     - Patches apply to shared sections, affecting both views
  *
  * Copyright (C) 2024 E9Patch Contributors
  * License: GPLv3+
@@ -163,14 +165,13 @@ typedef struct {
     uint32_t data_rva;
     size_t data_size;
 
-    /* Embedded ARM64 ELF (NOT x86-64!) */
+    /* Embedded ELF headers */
     bool has_arm64_elf;
     off_t arm64_elf_offset;
     size_t arm64_elf_size;
 
-    /* NOTE: x86-64 has NO ELF header in normal APE */
-    bool is_assimilated;       /* True if --assimilate was run */
-    off_t x86_elf_offset;      /* Only valid if assimilated */
+    bool has_x86_elf;          /* x86-64 ELF embedded in shell region */
+    off_t x86_elf_offset;      /* Offset of x86-64 ELF header */
 
     /* ZipOS */
     off_t zipos_start;
@@ -340,7 +341,23 @@ int e9_ape_parse(const uint8_t *data, size_t size, E9_APEInfo *info)
         }
     }
 
-    /* ── Find embedded ARM64 ELF ─────────────────────────────────────── */
+    /* ── Find embedded ELF headers ────────────────────────────────────── */
+
+    /* x86-64 ELF is embedded in the shell bootstrap region (before PE header)
+     * Placed where shell treats it as comment/string */
+    for (off_t i = 0x40; i + 64 < info->pe_offset && i + 64 < (off_t)size; i++)
+    {
+        if (memcmp(data + i, ELF_MAGIC, 4) == 0)
+        {
+            uint16_t e_machine = *(uint16_t *)(data + i + 18);
+            if (e_machine == ELF_MACHINE_X86_64)
+            {
+                info->has_x86_elf = true;
+                info->x86_elf_offset = i;
+                break;
+            }
+        }
+    }
 
     /* ARM64 ELF is typically after .data section */
     off_t search_start = info->data_offset + info->data_size;
@@ -350,19 +367,17 @@ int e9_ape_parse(const uint8_t *data, size_t size, E9_APEInfo *info)
     {
         if (memcmp(data + i, ELF_MAGIC, 4) == 0)
         {
-            /* Check if it's ARM64 (e_machine at offset 18) */
             uint16_t e_machine = *(uint16_t *)(data + i + 18);
             if (e_machine == ELF_MACHINE_AARCH64)
             {
                 info->has_arm64_elf = true;
                 info->arm64_elf_offset = i;
-                /* Size would need full ELF parsing */
                 break;
             }
-            else if (e_machine == ELF_MACHINE_X86_64)
+            else if (e_machine == ELF_MACHINE_X86_64 && !info->has_x86_elf)
             {
-                /* This APE was assimilated */
-                info->is_assimilated = true;
+                /* x86-64 ELF found outside shell region (e.g. assimilated) */
+                info->has_x86_elf = true;
                 info->x86_elf_offset = i;
             }
         }
@@ -524,8 +539,8 @@ int e9_ape_patch_rva(uint8_t *data, size_t size, const E9_APEInfo *info,
 }
 
 /*
- * Legacy API: Patch at "ELF virtual address"
- * Since APE has no x86-64 ELF, this maps through PE sections.
+ * Legacy API: Patch at virtual address
+ * Maps VA through PE section table (ELF and PE views share sections).
  * Assumes VA = ImageBase + RVA pattern.
  */
 int e9_ape_patch(uint8_t *data, size_t size, const E9_APEInfo *info,
@@ -534,8 +549,8 @@ int e9_ape_patch(uint8_t *data, size_t size, const E9_APEInfo *info,
     if (info == NULL)
         return -1;
 
-    /* If this APE was assimilated and has a real ELF header, we could
-     * use ELF program headers. But for normal APE, use PE mapping. */
+    /* Both ELF and PE views share the same code/data sections.
+     * Use PE section table for VA-to-offset translation. */
 
     /* Convert VA to RVA: typically VA = 0x400000 + RVA in APE */
     uint32_t rva;
@@ -721,7 +736,10 @@ void e9_ape_dump_info(const E9_APEInfo *info, FILE *out)
     if (info->has_arm64_elf)
         fprintf(out, " at 0x%lx", (unsigned long)info->arm64_elf_offset);
     fprintf(out, "\n");
-    fprintf(out, "  Assimilated: %s\n", info->is_assimilated ? "yes" : "no");
+    fprintf(out, "  x86-64 ELF: %s", info->has_x86_elf ? "yes" : "no");
+    if (info->has_x86_elf)
+        fprintf(out, " at 0x%lx", (unsigned long)info->x86_elf_offset);
+    fprintf(out, "\n");
     fprintf(out, "  ZipOS: start=0x%lx entries=%u\n",
             (unsigned long)info->zipos_start, info->zipos_num_entries);
 }

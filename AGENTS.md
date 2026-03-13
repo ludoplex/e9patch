@@ -13,13 +13,13 @@
 | **3** | ludoplex/binaryen | README | WASM IR for object diffing |
 
 **You cannot effectively work on e9studio without understanding:**
-- APE polyglot structure (PE sections are ground truth, NOT ELF)
+- APE polyglot structure (contains BOTH ELF and PE views of shared sections)
 - cosmocc toolchain (GCC 14.1.0 default, Clang 19 via -mclang)
 - ZipOS virtual filesystem (/zip/ paths, mmap)
 - Cross-platform process memory APIs
 
 **Failure to read upstream docs will result in:**
-- Wrong APE patching (modifying ELF instead of PE sections)
+- Wrong APE patching (not syncing both ELF and PE views)
 - Using incompatible tools (TinyCC, libclang library)
 - Broken cross-platform code
 
@@ -88,7 +88,7 @@ gen/
 └── domain/               # Generated types (DO NOT HAND-EDIT)
 
 src/e9patch/
-├── e9ape.c,h             # APE patching (PE-based) - PURE C
+├── e9ape.c,h             # APE patching (ELF+PE polyglot) - PURE C
 ├── e9livereload.c,h      # Live reload integration - PURE C
 ├── e9procmem.c,h         # Cross-platform process memory - PURE C
 ├── wasm/                 # Binaryen WASM integration
@@ -117,7 +117,7 @@ E9_{TYPE}_{VALUE}        # Enums
 
 - Return `0` on success, `-1` on error
 - Use `e9_livereload_get_error()` for error strings
-- PE sections are ground truth for APE (no x86-64 ELF!)
+- APE contains both ELF and PE views of shared sections
 - ZipOS contains embedded assets (e.g., `binaryen.wasm`)
 
 ## Live Reload (Hot Patching)
@@ -131,7 +131,7 @@ File Watch → cosmocc Recompile → Binaryen Diff → APE Patch → ICache Flus
 Key files:
 - `src/e9patch/e9livereload.h` - Live reload API
 - `src/e9patch/e9livereload.c` - Integration layer
-- `src/e9patch/e9ape.h` - APE patching (PE-based)
+- `src/e9patch/e9ape.h` - APE patching (ELF+PE polyglot)
 - `src/e9patch/wasm/e9binaryen.h` - Object diff via Binaryen
 - `specs/e9livereload.schema` - Protocol spec
 

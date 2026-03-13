@@ -5,21 +5,21 @@
  *
  * Based on RE analysis of actual APE binary (cosmocc output).
  *
- * KEY INSIGHT: APE has NO x86-64 ELF header embedded!
- *
- * Structure discovered via RE:
+ * APE is a polyglot binary containing BOTH ELF and PE views:
  *   0x00000 - MZ header "MZqFpD" + shell script bootstrap
+ *             (x86-64 ELF header embedded in shell region)
  *   0x10A58 - PE header (e_lfanew points here)
  *   0x11000 - .text section (file offset == RVA in APE)
  *   0x2F000 - .rdata section
  *   0x35000 - .data section
- *   0x3C000 - ARM64 ELF (for aarch64 only)
+ *   0x3C000 - ARM64 ELF (for aarch64)
  *   EOF-256 - ZipOS (.cosmo, .symtab.*)
  *
  * For patching x86-64:
- *   - Use PE sections as ground truth
- *   - file_offset often equals RVA
- *   - No ELF program headers to parse
+ *   - Both PE and ELF views map to the same code sections
+ *   - PE sections provide the canonical section table
+ *   - ELF program headers also point to actual code sections
+ *   - Patches must be consistent across both views
  *
  * Pure C implementation for cosmo-bde dogfooding.
  *
@@ -70,8 +70,8 @@ typedef struct {
     bool has_arm64_elf;
     off_t arm64_elf_offset;
 
-    bool is_assimilated;   /* Has ELF header (--assimilate was run) */
-    off_t x86_elf_offset;
+    bool has_x86_elf;      /* Has x86-64 ELF header (normal for APE) */
+    off_t x86_elf_offset;  /* Offset of embedded x86-64 ELF header */
 
     /* ZipOS */
     off_t zipos_start;
