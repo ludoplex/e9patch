@@ -37,7 +37,7 @@ Part of cosmo-bde, demonstrating spec-driven C code generation.
 | Constraint | Rationale |
 |------------|-----------|
 | Pure C only | Dogfooding with C generators |
-| APE-native | Patch ELF+PE+shell+ZipOS simultaneously |
+| APE-native | Patch ELF+PE+Mach-O+shell+ZipOS simultaneously |
 | Spec-driven | Types from `.schema`, FSMs from `.sm` |
 | Cosmopolitan | Builds with cosmocc for portability |
 
