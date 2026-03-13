@@ -7,12 +7,13 @@
  *
  * KEY FINDINGS FROM RE ANALYSIS:
  *
- *   APE is a polyglot containing BOTH x86-64 ELF and PE views.
+ *   APE is a polyglot containing x86-64 ELF, PE, and Mach-O views.
  *
  *   Actual structure of hello.ape (409KB):
  *     0x00000 - MZ header "MZqFpD" + shell script bootstrap (heredoc)
  *               x86-64 ELF header embedded in shell region
- *               (placed where shell treats it as comment/string)
+ *               Mach-O header also embedded in shell region
+ *               (placed where shell treats them as comment/string)
  *     0x10A58 - PE header (e_lfanew at 0x3C points here)
  *     0x10AF0 - PE section table (3 sections)
  *     0x11000 - .text section (code, file_offset == RVA)
@@ -29,9 +30,9 @@
  *       c) With --assimilate, overwrites MZ with ELF header
  *
  *   For patching:
- *     - Both ELF and PE views map the same code/data sections
+ *     - ELF, PE, and Mach-O views all map the same code/data sections
  *     - PE section table provides canonical mapping
- *     - Patches apply to shared sections, affecting both views
+ *     - Patches apply to shared sections, affecting all views
  *
  * Copyright (C) 2024 E9Patch Contributors
  * License: GPLv3+
@@ -63,6 +64,9 @@
 #define ZIP_LOCAL_MAGIC     "PK\x03\x04"
 #define ZIP_CENTRAL_MAGIC   "PK\x01\x02"
 #define ZIP_END_MAGIC       "PK\x05\x06"
+
+#define MACHO_MAGIC_64      0xFEEDFACF
+#define MACHO_MAGIC_64_REV  0xCFFAEDFE
 
 #define PE_MACHINE_AMD64    0x8664
 #define PE_MACHINE_ARM64    0xAA64
@@ -172,6 +176,10 @@ typedef struct {
 
     bool has_x86_elf;          /* x86-64 ELF embedded in shell region */
     off_t x86_elf_offset;      /* Offset of x86-64 ELF header */
+
+    /* Embedded Mach-O */
+    bool has_macho;            /* Mach-O header embedded in shell region */
+    off_t macho_offset;        /* Offset of Mach-O header */
 
     /* ZipOS */
     off_t zipos_start;
@@ -341,20 +349,28 @@ int e9_ape_parse(const uint8_t *data, size_t size, E9_APEInfo *info)
         }
     }
 
-    /* ── Find embedded ELF headers ────────────────────────────────────── */
+    /* ── Find embedded headers in shell bootstrap region ──────────────── */
 
-    /* x86-64 ELF is embedded in the shell bootstrap region (before PE header)
-     * Placed where shell treats it as comment/string */
+    /* x86-64 ELF and Mach-O are embedded in the shell bootstrap region
+     * (before PE header), placed where shell treats them as comment/string */
     for (off_t i = 0x40; i + 64 < info->pe_offset && i + 64 < (off_t)size; i++)
     {
-        if (memcmp(data + i, ELF_MAGIC, 4) == 0)
+        if (!info->has_x86_elf && memcmp(data + i, ELF_MAGIC, 4) == 0)
         {
             uint16_t e_machine = *(uint16_t *)(data + i + 18);
             if (e_machine == ELF_MACHINE_X86_64)
             {
                 info->has_x86_elf = true;
                 info->x86_elf_offset = i;
-                break;
+            }
+        }
+        else if (!info->has_macho && i + 4 <= (off_t)size)
+        {
+            uint32_t magic = *(uint32_t *)(data + i);
+            if (magic == MACHO_MAGIC_64 || magic == MACHO_MAGIC_64_REV)
+            {
+                info->has_macho = true;
+                info->macho_offset = i;
             }
         }
     }
@@ -739,6 +755,10 @@ void e9_ape_dump_info(const E9_APEInfo *info, FILE *out)
     fprintf(out, "  x86-64 ELF: %s", info->has_x86_elf ? "yes" : "no");
     if (info->has_x86_elf)
         fprintf(out, " at 0x%lx", (unsigned long)info->x86_elf_offset);
+    fprintf(out, "\n");
+    fprintf(out, "  Mach-O: %s", info->has_macho ? "yes" : "no");
+    if (info->has_macho)
+        fprintf(out, " at 0x%lx", (unsigned long)info->macho_offset);
     fprintf(out, "\n");
     fprintf(out, "  ZipOS: start=0x%lx entries=%u\n",
             (unsigned long)info->zipos_start, info->zipos_num_entries);

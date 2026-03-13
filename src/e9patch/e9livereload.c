@@ -4,7 +4,7 @@
  * ═══════════════════════════════════════════════════════════════════════
  *
  * Wires together the following components:
- *   - e9ape.h: APE parsing and polyglot patching (ELF+PE)
+ *   - e9ape.h: APE parsing and polyglot patching (ELF+PE+Mach-O)
  *   - e9binaryen.h: Object file diffing and patch generation
  *   - e9wasm_host.h: Memory mapping and icache flush
  *

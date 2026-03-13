@@ -5,11 +5,11 @@
 # Analysis date: 2026-02-28
 #
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║ APE is a polyglot: contains BOTH x86-64 ELF and PE views         ║
+# ║ APE is a polyglot: contains ELF, PE, and Mach-O views             ║
 # ║                                                                   ║
 # ║ Actual structure (from RE of hello.ape):                         ║
 # ║   0x00000 - MZ header + shell script bootstrap (heredoc trick)   ║
-# ║             x86-64 ELF header embedded in shell region            ║
+# ║             x86-64 ELF and Mach-O headers in shell region         ║
 # ║   0x10A58 - PE header (e_lfanew points here)                     ║
 # ║   0x11000 - .text section (shared code)                          ║
 # ║   0x2F000 - .rdata section                                       ║
@@ -24,7 +24,7 @@
 # ║     b) Or extracts loader to $TMPDIR/.ape-1.10                   ║
 # ║     c) Or --assimilate overwrites MZ with ELF header             ║
 # ║                                                                   ║
-# ║ Both ELF and PE views map the same shared code/data sections.    ║
+# ║ ELF, PE, and Mach-O views all map the same code/data sections.   ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
 # ── PE File Header (COFF) ─────────────────────────────────────────────
@@ -157,6 +157,10 @@ type E9ApeInfo {
     # x86-64 ELF header is embedded in shell bootstrap region
     x86_has_elf: i32 [default: 1]   # Normal for APE polyglot
     x86_elf_offset: i64             # Offset of embedded x86-64 ELF header
+
+    # Mach-O header is embedded in shell bootstrap region
+    has_macho: i32 [default: 1]     # Normal for APE polyglot
+    macho_offset: i64               # Offset of embedded Mach-O header
 
     # ZipOS
     zipos_start: i64                # First PK signature

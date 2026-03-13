@@ -5,9 +5,10 @@
  *
  * Based on RE analysis of actual APE binary (cosmocc output).
  *
- * APE is a polyglot binary containing BOTH ELF and PE views:
+ * APE is a polyglot binary containing ELF, PE, and Mach-O views:
  *   0x00000 - MZ header "MZqFpD" + shell script bootstrap
  *             (x86-64 ELF header embedded in shell region)
+ *             (Mach-O header also embedded in shell region)
  *   0x10A58 - PE header (e_lfanew points here)
  *   0x11000 - .text section (file offset == RVA in APE)
  *   0x2F000 - .rdata section
@@ -16,10 +17,10 @@
  *   EOF-256 - ZipOS (.cosmo, .symtab.*)
  *
  * For patching x86-64:
- *   - Both PE and ELF views map to the same code sections
+ *   - PE, ELF, and Mach-O views all map to the same code sections
  *   - PE sections provide the canonical section table
  *   - ELF program headers also point to actual code sections
- *   - Patches must be consistent across both views
+ *   - Patches must be consistent across all views
  *
  * Pure C implementation for cosmo-bde dogfooding.
  *
@@ -72,6 +73,9 @@ typedef struct {
 
     bool has_x86_elf;      /* Has x86-64 ELF header (normal for APE) */
     off_t x86_elf_offset;  /* Offset of embedded x86-64 ELF header */
+
+    bool has_macho;        /* Has Mach-O header (normal for APE) */
+    off_t macho_offset;    /* Offset of embedded Mach-O header */
 
     /* ZipOS */
     off_t zipos_start;
