@@ -6,20 +6,26 @@
  * Based on RE analysis of actual APE binary (cosmocc output).
  *
  * APE is a polyglot binary with ELF, PE, and Mach-O views.
- * Per ape.S and apelink.c, the static file layout is:
+ * Verified via RE of cosmocc gcc.com + apelink.c upstream:
  *
- *   [Shell script prologue]     - MZ/"MZqFpD" + POSIX shell commands
- *   [ELF header + phdrs]        - x86-64 ELF (present in prologue)
- *   [Mach-O header + loads]     - Mach-O 64 (present in prologue)
- *   [PE header + sections]      - at e_lfanew offset
- *   [.text, .rdata, .data]      - shared code/data sections
- *   [ARM64 ELF]                 - for aarch64
- *   [Compressed loaders]        - gzip'd platform loaders
- *   [ZipOS]                     - .cosmo, .symtab.*
+ *   Static file layout:
+ *     [MZ + shell script]        - "MZqFpD" + platform detect + assimilate
+ *     [App Mach-O hdr+loads]     - 0xFEEDFACF, __APE1/2/3 segments
+ *     [App ELF phdrs]            - phdrs only (ehdr printf'd at runtime)
+ *     [PE header + sections]     - at e_lfanew offset, works directly
+ *     [Loader Mach-O]            - APE loader's Mach-O (different from app's)
+ *     [Loader ELF hdr+phdrs]     - APE loader's ELF (base 0x7f000000)
+ *     [.text, .rdata, .data]     - shared code/data sections
+ *     [ARM64 ELF]                - for aarch64
+ *     [Compressed loaders]       - gzip'd ape loaders
+ *     [ZipOS]                    - .symtab.*, timezone data, etc.
  *
- * At runtime, the shell bootstrap writes the appropriate header
- * to offset 0 (ELF via printf, Mach-O via dd, PE works as-is).
- * --assimilate permanently overwrites MZ with ELF.
+ * Runtime:
+ *   Linux --assimilate: printf writes 64-byte ELF ehdr to offset 0,
+ *     referencing phdrs already present in the file.
+ *   macOS --assimilate: dd copies Mach-O from embedded offset to offset 0.
+ *   Windows: MZ + PE at e_lfanew works directly.
+ *   Normal: ape loader extracted and exec'd.
  *
  * For patching x86-64:
  *   - All views map the same shared code/data sections
@@ -75,11 +81,15 @@ typedef struct {
     bool has_arm64_elf;
     off_t arm64_elf_offset;
 
-    bool has_x86_elf;      /* x86-64 ELF header found in prologue */
-    off_t x86_elf_offset;  /* Offset of ELF header (or 0 if assimilated) */
+    bool has_x86_elf;      /* x86-64 ELF header in prologue (loader's, not app's) */
+    off_t x86_elf_offset;  /* Offset of loader's ELF header */
 
-    bool has_macho;        /* Mach-O header found in prologue */
-    off_t macho_offset;    /* Offset of Mach-O header in file */
+    bool has_elf_phdrs;    /* App's ELF phdrs present (for --assimilate) */
+    off_t elf_phdrs_offset;/* Offset of app's ELF phdrs (ehdr printf'd at runtime) */
+
+    bool has_macho;        /* App's Mach-O header in prologue (dd'd to offset 0) */
+    off_t macho_offset;    /* Offset of app's Mach-O header */
+    size_t macho_size;     /* Size of Mach-O header + load commands */
 
     /* ZipOS */
     off_t zipos_start;

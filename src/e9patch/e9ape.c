@@ -5,34 +5,48 @@
  *
  * Based on RE analysis of actual APE binary (cosmocc output, 2026-02-28)
  *
- * KEY FINDINGS (from ape.S + apelink.c upstream):
+ * KEY FINDINGS (from RE of gcc.com + apelink.c upstream):
  *
- *   APE is a polyglot with ELF, PE, and Mach-O views — but they are
- *   NOT all present as raw headers in the static file on disk:
+ *   APE is a polyglot with ELF, PE, and Mach-O views.
+ *   Not all are present as complete headers in the static file:
  *
- *   Static file layout (from apelink.c):
- *     [Shell script prologue]     - MZ/"MZqFpD" + POSIX shell commands
- *       Contains printf '\177ELF...' to write ELF header at runtime
- *       Contains dd commands to extract embedded Mach-O at runtime
- *     [ELF notes]                 - APE version, OS identification
- *     [ELF header + phdrs]        - x86-64 ELF (for ape loader)
- *     [Mach-O header + loads]     - Mach-O 64-bit (extracted via dd)
- *     [PE header + sections]      - at e_lfanew offset (e.g. 0x10A58)
- *     [.text section]             - shared code (file_offset == RVA)
- *     [.rdata section]
- *     [.data section]
- *     [ARM64 ELF]                 - for aarch64
- *     [Compressed loaders]        - gzip'd platform loaders
- *     [ZipOS]                     - PK signatures, .cosmo, .symtab.*
+ *   Static file layout (verified via RE of cosmocc gcc.com):
+ *     0x00000  MZ header "MZqFpD='\n"
+ *     0x00028  Shell heredoc content (x86 real-mode bootstrap in heredoc)
+ *     0x00201  Heredoc end marker + shell script body:
+ *              - Platform detection (uname -m/-s)
+ *              - ape loader exec chain
+ *              - --assimilate: printf ELF header to offset 0 (x86-64)
+ *              - --assimilate: dd Mach-O from 0xC98 to offset 0 (macOS)
+ *              - Compressed loader extraction (gzip'd ape loader)
+ *     0x00C98  Mach-O header + load commands (app's Mach-O, ~528 bytes)
+ *              Segments: __PAGEZERO, __APE1, __APE2, __APE3
+ *     0x00EA8  ELF program headers for --assimilate (phdrs only, no ehdr!)
+ *              PT_LOAD(RX), PT_LOAD(RW), PT_TLS, PT_GNU_STACK, etc.
+ *              Base: 0x0800000000
+ *     ~padding~
+ *     0x10C78  PE header (at e_lfanew offset) + COFF + optional header
+ *     0x10D10  PE section table (.text, .rdata, .data)
+ *     0x10D88  Mach-O #2 (loader's Mach-O, different from app's)
+ *     0x10FC0  ELF header (APE loader's ELF, base 0x7f000000, NOT the app)
+ *     0x11000  ELF phdrs for loader (4 entries)
+ *     0x11100  Mach-O #3 (loader variant, 5 load commands)
+ *     0x14000  .text section (shared code, file_offset == RVA)
+ *     ...      .rdata, .data sections
+ *     ...      ARM64 ELF (for aarch64)
+ *     ...      Compressed ape loaders (gzip'd)
+ *     EOF-area ZipOS (.symtab.amd64, .symtab.arm64, timezone data, etc.)
  *
  *   Runtime behavior:
- *     Linux:  shell printf's ELF header to offset 0, or ape loader
- *             maps it; --assimilate overwrites MZ with ELF permanently
- *     macOS:  shell dd's Mach-O from embedded offset to offset 0
- *     Windows: PE header at e_lfanew works directly (MZ stub)
+ *     Linux:  --assimilate: printf writes 64-byte ELF ehdr to offset 0,
+ *             referencing phdrs already at 0xEA8.
+ *             Normal: ape loader maps the binary via its own ELF at 0x10FC0.
+ *     macOS:  --assimilate: dd copies Mach-O from 0xC98 to offset 0.
+ *             Normal: compressed loader extracted, compiles via cc on arm64.
+ *     Windows: MZ + PE at e_lfanew works directly.
  *
  *   For patching:
- *     - All views map the same code/data sections
+ *     - All views map the same .text/.rdata/.data sections
  *     - PE section table provides canonical offset mapping
  *     - Patches to shared sections affect all views
  *
@@ -171,17 +185,23 @@ typedef struct {
     uint32_t data_rva;
     size_t data_size;
 
-    /* Embedded ELF headers */
+    /* Embedded ELF */
     bool has_arm64_elf;
     off_t arm64_elf_offset;
     size_t arm64_elf_size;
 
-    bool has_x86_elf;          /* x86-64 ELF header found in prologue */
-    off_t x86_elf_offset;      /* Offset of x86-64 ELF header */
+    /* App ELF: ehdr generated at runtime by printf (--assimilate),
+     * but phdrs are present in file (e.g. at 0xEA8 in gcc.com).
+     * Loader ELF: complete ehdr+phdrs in prologue (e.g. at 0x10FC0). */
+    bool has_x86_elf;          /* x86-64 ELF ehdr found in file */
+    off_t x86_elf_offset;      /* Offset (may be loader's, not app's) */
+    bool has_elf_phdrs;        /* App's ELF phdrs present (for --assimilate) */
+    off_t elf_phdrs_offset;    /* Offset of app's ELF phdrs */
 
-    /* Embedded Mach-O (present in file, dd'd to offset 0 on macOS) */
+    /* Embedded Mach-O (app's, present at rest, dd'd to offset 0 on macOS) */
     bool has_macho;
-    off_t macho_offset;        /* Offset of Mach-O header in file */
+    off_t macho_offset;        /* Offset of app's Mach-O header */
+    size_t macho_size;         /* Size of Mach-O header + load commands */
 
     /* ZipOS */
     off_t zipos_start;
@@ -353,35 +373,73 @@ int e9_ape_parse(const uint8_t *data, size_t size, E9_APEInfo *info)
 
     /* ── Find embedded headers ─────────────────────────────────────────
      *
-     * Per apelink.c, the APE prologue layout is:
-     *   [shell script] [ELF notes] [ELF hdr+phdrs] [Mach-O hdr+loads] [PE]
+     * RE of gcc.com reveals the prologue layout:
      *
-     * x86-64 ELF and Mach-O are present in the file as raw bytes in the
-     * prologue region (between shell script and .text section).
-     * On Linux, the shell printf's ELF to offset 0 (or ape loader maps it).
-     * On macOS, the shell dd's Mach-O from its embedded offset to offset 0.
+     *   0x000   MZ + shell script (heredoc + platform detect + assimilate)
+     *   ~0xC98  App's Mach-O header + load commands (__APE1/2/3 segments)
+     *           Shell: dd skip=<offset> count=<size> copies to offset 0
+     *   ~0xEA8  App's ELF program headers (phdrs only, no ehdr!)
+     *           The ehdr is printf'd to offset 0 by --assimilate
+     *   ...PE header at e_lfanew...
+     *   ~0x10D88 Loader's Mach-O (different from app's)
+     *   ~0x10FC0 Loader's x86-64 ELF (base 0x7f000000, NOT the app)
+     *   ~0x11100 Loader's Mach-O variant
      *
-     * Scan the prologue region (offset 0x40 up to .text start) for both. */
+     * Scan the prologue region (up to .text start) for:
+     * 1. First Mach-O magic = app's Mach-O (before PE header)
+     * 2. ELF magic = loader's ELF (may be after PE header)
+     * 3. PT_LOAD phdrs for the app (between Mach-O and PE)       */
     off_t prologue_end = info->text_offset > 0 ? info->text_offset
                                                 : (off_t)size;
-    for (off_t i = 0x40; i + 64 < prologue_end && i + 64 < (off_t)size; i++)
+
+    /* Find app's Mach-O (first 0xFEEDFACF before PE header) */
+    for (off_t i = 0x200; i + 32 < info->pe_offset && i + 32 < (off_t)size; i++)
     {
-        if (!info->has_x86_elf && memcmp(data + i, ELF_MAGIC, 4) == 0)
-        {
-            uint16_t e_machine = *(uint16_t *)(data + i + 18);
-            if (e_machine == ELF_MACHINE_X86_64)
-            {
-                info->has_x86_elf = true;
-                info->x86_elf_offset = i;
-            }
-        }
-        if (!info->has_macho && i + 4 <= (off_t)size)
+        if (i + 4 <= (off_t)size)
         {
             uint32_t magic = *(uint32_t *)(data + i);
             if (magic == MACHO_MAGIC_64 || magic == MACHO_MAGIC_64_REV)
             {
                 info->has_macho = true;
                 info->macho_offset = i;
+
+                /* Parse ncmds and sizeofcmds to get total size */
+                if (i + 32 <= (off_t)size)
+                {
+                    uint32_t sizeofcmds = *(uint32_t *)(data + i + 20);
+                    info->macho_size = 32 + sizeofcmds; /* header + commands */
+                }
+
+                /* ELF phdrs for --assimilate follow immediately after Mach-O.
+                 * Check for PT_LOAD (type=1) at the next aligned position. */
+                off_t post_macho = i + info->macho_size;
+                if (post_macho + 56 < (off_t)size)
+                {
+                    uint32_t p_type = *(uint32_t *)(data + post_macho);
+                    if (p_type == 1)  /* PT_LOAD */
+                    {
+                        info->has_elf_phdrs = true;
+                        info->elf_phdrs_offset = post_macho;
+                    }
+                }
+                break;
+            }
+        }
+    }
+
+    /* Find x86-64 ELF headers in full prologue (may be after PE header).
+     * Note: the first one found is typically the APE loader's ELF,
+     * not the application's (app uses printf-generated ehdr). */
+    for (off_t i = 0x40; i + 64 < prologue_end && i + 64 < (off_t)size; i++)
+    {
+        if (memcmp(data + i, ELF_MAGIC, 4) == 0)
+        {
+            uint16_t e_machine = *(uint16_t *)(data + i + 18);
+            if (e_machine == ELF_MACHINE_X86_64)
+            {
+                info->has_x86_elf = true;
+                info->x86_elf_offset = i;
+                break;
             }
         }
     }
@@ -763,13 +821,18 @@ void e9_ape_dump_info(const E9_APEInfo *info, FILE *out)
     if (info->has_arm64_elf)
         fprintf(out, " at 0x%lx", (unsigned long)info->arm64_elf_offset);
     fprintf(out, "\n");
-    fprintf(out, "  x86-64 ELF: %s", info->has_x86_elf ? "yes" : "no");
+    fprintf(out, "  Loader ELF: %s", info->has_x86_elf ? "yes" : "no");
     if (info->has_x86_elf)
         fprintf(out, " at 0x%lx", (unsigned long)info->x86_elf_offset);
     fprintf(out, "\n");
-    fprintf(out, "  Mach-O: %s", info->has_macho ? "yes" : "no");
+    fprintf(out, "  App ELF phdrs: %s", info->has_elf_phdrs ? "yes" : "no");
+    if (info->has_elf_phdrs)
+        fprintf(out, " at 0x%lx", (unsigned long)info->elf_phdrs_offset);
+    fprintf(out, "\n");
+    fprintf(out, "  App Mach-O: %s", info->has_macho ? "yes" : "no");
     if (info->has_macho)
-        fprintf(out, " at 0x%lx", (unsigned long)info->macho_offset);
+        fprintf(out, " at 0x%lx (size=%zu)", (unsigned long)info->macho_offset,
+                info->macho_size);
     fprintf(out, "\n");
     fprintf(out, "  ZipOS: start=0x%lx entries=%u\n",
             (unsigned long)info->zipos_start, info->zipos_num_entries);
