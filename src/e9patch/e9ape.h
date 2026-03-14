@@ -5,21 +5,25 @@
  *
  * Based on RE analysis of actual APE binary (cosmocc output).
  *
- * APE is a polyglot binary containing ELF, PE, and Mach-O views:
- *   0x00000 - MZ header "MZqFpD" + shell script bootstrap
- *             (x86-64 ELF header embedded in shell region)
- *             (Mach-O header also embedded in shell region)
- *   0x10A58 - PE header (e_lfanew points here)
- *   0x11000 - .text section (file offset == RVA in APE)
- *   0x2F000 - .rdata section
- *   0x35000 - .data section
- *   0x3C000 - ARM64 ELF (for aarch64)
- *   EOF-256 - ZipOS (.cosmo, .symtab.*)
+ * APE is a polyglot binary with ELF, PE, and Mach-O views.
+ * Per ape.S and apelink.c, the static file layout is:
+ *
+ *   [Shell script prologue]     - MZ/"MZqFpD" + POSIX shell commands
+ *   [ELF header + phdrs]        - x86-64 ELF (present in prologue)
+ *   [Mach-O header + loads]     - Mach-O 64 (present in prologue)
+ *   [PE header + sections]      - at e_lfanew offset
+ *   [.text, .rdata, .data]      - shared code/data sections
+ *   [ARM64 ELF]                 - for aarch64
+ *   [Compressed loaders]        - gzip'd platform loaders
+ *   [ZipOS]                     - .cosmo, .symtab.*
+ *
+ * At runtime, the shell bootstrap writes the appropriate header
+ * to offset 0 (ELF via printf, Mach-O via dd, PE works as-is).
+ * --assimilate permanently overwrites MZ with ELF.
  *
  * For patching x86-64:
- *   - PE, ELF, and Mach-O views all map to the same code sections
+ *   - All views map the same shared code/data sections
  *   - PE sections provide the canonical section table
- *   - ELF program headers also point to actual code sections
  *   - Patches must be consistent across all views
  *
  * Pure C implementation for cosmo-bde dogfooding.
@@ -71,11 +75,11 @@ typedef struct {
     bool has_arm64_elf;
     off_t arm64_elf_offset;
 
-    bool has_x86_elf;      /* Has x86-64 ELF header (normal for APE) */
-    off_t x86_elf_offset;  /* Offset of embedded x86-64 ELF header */
+    bool has_x86_elf;      /* x86-64 ELF header found in prologue */
+    off_t x86_elf_offset;  /* Offset of ELF header (or 0 if assimilated) */
 
-    bool has_macho;        /* Has Mach-O header (normal for APE) */
-    off_t macho_offset;    /* Offset of embedded Mach-O header */
+    bool has_macho;        /* Mach-O header found in prologue */
+    off_t macho_offset;    /* Offset of Mach-O header in file */
 
     /* ZipOS */
     off_t zipos_start;

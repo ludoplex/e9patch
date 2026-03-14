@@ -5,34 +5,36 @@
  *
  * Based on RE analysis of actual APE binary (cosmocc output, 2026-02-28)
  *
- * KEY FINDINGS FROM RE ANALYSIS:
+ * KEY FINDINGS (from ape.S + apelink.c upstream):
  *
- *   APE is a polyglot containing x86-64 ELF, PE, and Mach-O views.
+ *   APE is a polyglot with ELF, PE, and Mach-O views — but they are
+ *   NOT all present as raw headers in the static file on disk:
  *
- *   Actual structure of hello.ape (409KB):
- *     0x00000 - MZ header "MZqFpD" + shell script bootstrap (heredoc)
- *               x86-64 ELF header embedded in shell region
- *               Mach-O header also embedded in shell region
- *               (placed where shell treats them as comment/string)
- *     0x10A58 - PE header (e_lfanew at 0x3C points here)
- *     0x10AF0 - PE section table (3 sections)
- *     0x11000 - .text section (code, file_offset == RVA)
- *     0x2F000 - .rdata section
- *     0x35000 - .data section
- *     0x3C000 - ARM64 ELF (for aarch64)
- *     EOF-256 - ZipOS (.cosmo, .symtab.amd64, .symtab.arm64)
+ *   Static file layout (from apelink.c):
+ *     [Shell script prologue]     - MZ/"MZqFpD" + POSIX shell commands
+ *       Contains printf '\177ELF...' to write ELF header at runtime
+ *       Contains dd commands to extract embedded Mach-O at runtime
+ *     [ELF notes]                 - APE version, OS identification
+ *     [ELF header + phdrs]        - x86-64 ELF (for ape loader)
+ *     [Mach-O header + loads]     - Mach-O 64-bit (extracted via dd)
+ *     [PE header + sections]      - at e_lfanew offset (e.g. 0x10A58)
+ *     [.text section]             - shared code (file_offset == RVA)
+ *     [.rdata section]
+ *     [.data section]
+ *     [ARM64 ELF]                 - for aarch64
+ *     [Compressed loaders]        - gzip'd platform loaders
+ *     [ZipOS]                     - PK signatures, .cosmo, .symtab.*
  *
- *   On Linux x86-64:
- *     - Kernel sees "#!/bin/sh" shell script (or #!/ equivalent)
- *     - Shell executes bootstrap which either:
- *       a) Uses `ape` loader from PATH
- *       b) Extracts loader to $TMPDIR/.ape-X.XX
- *       c) With --assimilate, overwrites MZ with ELF header
+ *   Runtime behavior:
+ *     Linux:  shell printf's ELF header to offset 0, or ape loader
+ *             maps it; --assimilate overwrites MZ with ELF permanently
+ *     macOS:  shell dd's Mach-O from embedded offset to offset 0
+ *     Windows: PE header at e_lfanew works directly (MZ stub)
  *
  *   For patching:
- *     - ELF, PE, and Mach-O views all map the same code/data sections
- *     - PE section table provides canonical mapping
- *     - Patches apply to shared sections, affecting all views
+ *     - All views map the same code/data sections
+ *     - PE section table provides canonical offset mapping
+ *     - Patches to shared sections affect all views
  *
  * Copyright (C) 2024 E9Patch Contributors
  * License: GPLv3+
@@ -174,12 +176,12 @@ typedef struct {
     off_t arm64_elf_offset;
     size_t arm64_elf_size;
 
-    bool has_x86_elf;          /* x86-64 ELF embedded in shell region */
+    bool has_x86_elf;          /* x86-64 ELF header found in prologue */
     off_t x86_elf_offset;      /* Offset of x86-64 ELF header */
 
-    /* Embedded Mach-O */
-    bool has_macho;            /* Mach-O header embedded in shell region */
-    off_t macho_offset;        /* Offset of Mach-O header */
+    /* Embedded Mach-O (present in file, dd'd to offset 0 on macOS) */
+    bool has_macho;
+    off_t macho_offset;        /* Offset of Mach-O header in file */
 
     /* ZipOS */
     off_t zipos_start;
@@ -349,11 +351,20 @@ int e9_ape_parse(const uint8_t *data, size_t size, E9_APEInfo *info)
         }
     }
 
-    /* ── Find embedded headers in shell bootstrap region ──────────────── */
-
-    /* x86-64 ELF and Mach-O are embedded in the shell bootstrap region
-     * (before PE header), placed where shell treats them as comment/string */
-    for (off_t i = 0x40; i + 64 < info->pe_offset && i + 64 < (off_t)size; i++)
+    /* ── Find embedded headers ─────────────────────────────────────────
+     *
+     * Per apelink.c, the APE prologue layout is:
+     *   [shell script] [ELF notes] [ELF hdr+phdrs] [Mach-O hdr+loads] [PE]
+     *
+     * x86-64 ELF and Mach-O are present in the file as raw bytes in the
+     * prologue region (between shell script and .text section).
+     * On Linux, the shell printf's ELF to offset 0 (or ape loader maps it).
+     * On macOS, the shell dd's Mach-O from its embedded offset to offset 0.
+     *
+     * Scan the prologue region (offset 0x40 up to .text start) for both. */
+    off_t prologue_end = info->text_offset > 0 ? info->text_offset
+                                                : (off_t)size;
+    for (off_t i = 0x40; i + 64 < prologue_end && i + 64 < (off_t)size; i++)
     {
         if (!info->has_x86_elf && memcmp(data + i, ELF_MAGIC, 4) == 0)
         {
@@ -364,7 +375,7 @@ int e9_ape_parse(const uint8_t *data, size_t size, E9_APEInfo *info)
                 info->x86_elf_offset = i;
             }
         }
-        else if (!info->has_macho && i + 4 <= (off_t)size)
+        if (!info->has_macho && i + 4 <= (off_t)size)
         {
             uint32_t magic = *(uint32_t *)(data + i);
             if (magic == MACHO_MAGIC_64 || magic == MACHO_MAGIC_64_REV)

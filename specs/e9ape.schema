@@ -5,26 +5,23 @@
 # Analysis date: 2026-02-28
 #
 # ╔══════════════════════════════════════════════════════════════════╗
-# ║ APE is a polyglot: contains ELF, PE, and Mach-O views             ║
+# ║ APE is a polyglot with ELF, PE, and Mach-O views.                ║
 # ║                                                                   ║
-# ║ Actual structure (from RE of hello.ape):                         ║
-# ║   0x00000 - MZ header + shell script bootstrap (heredoc trick)   ║
-# ║             x86-64 ELF and Mach-O headers in shell region         ║
-# ║   0x10A58 - PE header (e_lfanew points here)                     ║
-# ║   0x11000 - .text section (shared code)                          ║
-# ║   0x2F000 - .rdata section                                       ║
-# ║   0x35000 - .data section                                        ║
-# ║   0x3C000 - ARM64 ELF (for aarch64)                              ║
-# ║   EOF-256 - ZipOS (PK signatures, .cosmo, .symtab.*)             ║
+# ║ Static file layout (per ape.S + apelink.c):                      ║
+# ║   [Shell script prologue]  - MZ + POSIX shell commands            ║
+# ║   [ELF header + phdrs]    - x86-64 ELF (in prologue)             ║
+# ║   [Mach-O header + loads]  - Mach-O 64 (in prologue)              ║
+# ║   [PE header + sections]   - at e_lfanew offset                   ║
+# ║   [.text, .rdata, .data]   - shared code/data sections            ║
+# ║   [ARM64 ELF]              - for aarch64                          ║
+# ║   [Compressed loaders]     - gzip'd platform loaders              ║
+# ║   [ZipOS]                  - .cosmo, .symtab.*                     ║
 # ║                                                                   ║
-# ║ On Linux x86-64:                                                  ║
-# ║   - Kernel sees "#!/" shell script header                        ║
-# ║   - Shell executes bootstrap which:                               ║
-# ║     a) Uses `ape` loader if available                            ║
-# ║     b) Or extracts loader to $TMPDIR/.ape-1.10                   ║
-# ║     c) Or --assimilate overwrites MZ with ELF header             ║
+# ║ At runtime, the shell bootstrap writes the appropriate header    ║
+# ║ to offset 0 (ELF via printf, Mach-O via dd, PE works as-is).    ║
+# ║ --assimilate permanently overwrites MZ with ELF.                 ║
 # ║                                                                   ║
-# ║ ELF, PE, and Mach-O views all map the same code/data sections.   ║
+# ║ All views map the same shared code/data sections.                ║
 # ╚══════════════════════════════════════════════════════════════════╝
 
 # ── PE File Header (COFF) ─────────────────────────────────────────────
@@ -154,13 +151,13 @@ type E9ApeInfo {
     arm64_elf_offset: i64           # 0 if not present (e.g., 0x3C000)
     arm64_elf_size: u64
 
-    # x86-64 ELF header is embedded in shell bootstrap region
-    x86_has_elf: i32 [default: 1]   # Normal for APE polyglot
-    x86_elf_offset: i64             # Offset of embedded x86-64 ELF header
+    # x86-64 ELF header (in prologue, printf'd to offset 0 at runtime)
+    x86_has_elf: i32 [default: 1]   # Present in prologue region
+    x86_elf_offset: i64             # File offset of ELF header
 
-    # Mach-O header is embedded in shell bootstrap region
-    has_macho: i32 [default: 1]     # Normal for APE polyglot
-    macho_offset: i64               # Offset of embedded Mach-O header
+    # Mach-O header (in prologue, dd'd to offset 0 on macOS)
+    has_macho: i32 [default: 1]     # Present in prologue region
+    macho_offset: i64               # File offset of Mach-O header
 
     # ZipOS
     zipos_start: i64                # First PK signature
